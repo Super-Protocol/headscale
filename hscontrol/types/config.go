@@ -68,6 +68,8 @@ type Config struct {
 
 	Database DatabaseConfig
 
+	NodesSync NodesSyncConfig
+
 	DERP DERPConfig
 
 	TLS TLSConfig
@@ -202,6 +204,12 @@ type DERPConfig struct {
 	UpdateFrequency                    time.Duration
 	IPv4                               string
 	IPv6                               string
+}
+
+type NodesSyncConfig struct {
+	Enabled      bool
+	SyncDir      string
+	SyncInterval uint64
 }
 
 type LogTailConfig struct {
@@ -509,6 +517,16 @@ func derpConfig() DERPConfig {
 		IPv6:                               ipv6,
 		AutomaticallyAddEmbeddedDerpRegion: automaticallyAddEmbeddedDerpRegion,
 	}
+}
+
+func nodesSyncConfig() NodesSyncConfig {
+	var cfg NodesSyncConfig
+
+	cfg.Enabled = viper.GetBool("nodes_sync.enabled")
+	cfg.SyncDir = viper.GetString("nodes_sync.sync_dir")
+	cfg.SyncInterval = viper.GetUint64("nodes_sync.sync_interval")
+
+	return cfg
 }
 
 func logtailConfig() LogTailConfig {
@@ -884,6 +902,8 @@ func LoadServerConfig() (*Config, error) {
 		}
 	}
 
+	nodesSync := nodesSyncConfig()
+
 	return &Config{
 		ServerURL:          serverURL,
 		Addr:               viper.GetString("listen_addr"),
@@ -900,6 +920,8 @@ func LoadServerConfig() (*Config, error) {
 			viper.GetString("noise.private_key_path"),
 		),
 		BaseDomain: dnsConfig.BaseDomain,
+
+		NodesSync: nodesSync,
 
 		DERP: derpConfig,
 

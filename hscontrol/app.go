@@ -86,8 +86,9 @@ type Headscale struct {
 	noisePrivateKey *key.MachinePrivate
 	ephemeralGC     *db.EphemeralGarbageCollector
 
-	DERPMap    *tailcfg.DERPMap
-	DERPServer *derpServer.DERPServer
+	DERPMap      *tailcfg.DERPMap
+	DERPServer   *derpServer.DERPServer
+	nodeJSONSync *db.NodeJSONSync
 
 	polManOnce     sync.Once
 	polMan         policy.PolicyManager
@@ -228,6 +229,26 @@ func NewHeadscale(cfg *types.Config) (*Headscale, error) {
 			return nil, err
 		}
 		app.DERPServer = embeddedDERPServer
+	}
+
+	if cfg.NodesSync.Enabled {
+		nodeSync, err := db.NewNodeJSONSync(
+			app.db,
+			cfg.NodesSync.SyncDir,
+			time.Duration(cfg.NodesSync.SyncInterval)*time.Second,
+			func() {
+				err = nodesChangedHook(app.db, app.polMan, app.nodeNotifier)
+				if err != nil {
+					log.Error().Err(err).
+						Msg("Can't notify nodes after nodes import from files")
+				}
+			},
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to start NodeJSONSync: %w", err)
+		}
+
+		app.nodeJSONSync = nodeSync
 	}
 
 	return &app, nil
@@ -901,6 +922,10 @@ func (h *Headscale) Serve() error {
 					info("shutting down grpc server (external)")
 					grpcServer.GracefulStop()
 					grpcListener.Close()
+				}
+
+				if h.nodeJSONSync != nil {
+					h.nodeJSONSync.Stop()
 				}
 
 				if tailsqlContext != nil {
