@@ -222,7 +222,9 @@ func (njs *NodeJSONSync) importNodesFromDir(ctx context.Context, dirPath string)
 			// Обновляем ноду только если UpdatedAt в JSON более новый
 			if node.UpdatedAt.After(existingNode.UpdatedAt) {
 				node.ID = existingNode.ID // сохраняем ID из БД
-				_, err := njs.hsdb.RegisterNode(node, node.IPv4, node.IPv6)
+				err := njs.hsdb.Write(func(tx *gorm.DB) error {
+					return tx.Save(&node).Error
+				})
 				if err != nil {
 					log.Error().Err(err).
 						Str("machine_key", node.MachineKey.ShortString()).
