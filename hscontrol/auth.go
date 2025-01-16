@@ -385,17 +385,6 @@ func (h *Headscale) handleAuthKey(
 			return
 		}
 
-		if h.nodeJSONSync != nil {
-			err := h.nodeJSONSync.ExportNodeToJSON(node)
-			if err != nil {
-				log.Error().
-					Caller().
-					Err(err).
-					Msg("could not export node to file")
-				http.Error(writer, "Internal server error", http.StatusInternalServerError)
-			}
-		}
-
 		err = nodesChangedHook(h.db, h.polMan, h.nodeNotifier)
 		if err != nil {
 			http.Error(writer, "Internal server error", http.StatusInternalServerError)

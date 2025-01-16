@@ -257,13 +257,6 @@ func (api headscaleV1APIServer) RegisterNode(
 	if err != nil {
 		return nil, err
 	}
-	
-	if api.h.nodeJSONSync != nil {
-		err := api.h.nodeJSONSync.ExportNodeToJSON(node)
-		if err != nil {
-			return nil, fmt.Errorf("can't export node to file: %w", err)
-		}
-	}
 
 	err = nodesChangedHook(api.h.db, api.h.polMan, api.h.nodeNotifier)
 	if err != nil {

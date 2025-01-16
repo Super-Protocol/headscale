@@ -83,11 +83,11 @@ func (njs *NodeJSONSync) start() {
 
 		case <-ticker.C:
 			// Периодически вызываем importNodesFromDir
-			err := njs.importNodesFromDir(njs.ctx, njs.dirPath)
+			err := njs.SyncNodes()
 			if err != nil {
 				log.Error().Err(err).
 					Str("dir", njs.dirPath).
-					Msg("Failed to import nodes from JSON directory")
+					Msg("Failed to sync nodes with JSON directory")
 			}
 		}
 	}
@@ -104,6 +104,30 @@ func (njs *NodeJSONSync) ExportNodeToJSON(node *types.Node) error {
 	encodedKey := encodeMachineKey(node.MachineKey)
 	fileName := filepath.Join(njs.dirPath, encodedKey+".json")
 
+	// Шаг 1: Проверяем, есть ли файл на диске
+	if _, err := os.Stat(fileName); err == nil {
+		// Файл существует, проверяем `UpdatedAt`
+		raw, err := ioutil.ReadFile(fileName)
+		if err != nil {
+			return fmt.Errorf("failed to read existing JSON file '%s': %w", fileName, err)
+		}
+
+		var existingNode types.Node
+		if err := json.Unmarshal(raw, &existingNode); err != nil {
+			return fmt.Errorf("failed to unmarshal existing JSON file '%s': %w", fileName, err)
+		}
+
+		// Сравниваем `UpdatedAt`
+		if !node.UpdatedAt.After(existingNode.UpdatedAt) {
+			log.Trace().
+				Str("file", fileName).
+				Str("machine_key", node.MachineKey.ShortString()).
+				Msg("Node on disk is newer or equal, skipping export")
+			return nil
+		}
+	}
+
+	// Шаг 2: Выполняем экспорт, если файл либо отсутствует, либо его версия старее
 	data, err := json.MarshalIndent(node, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal node to JSON: %w", err)
@@ -121,14 +145,37 @@ func (njs *NodeJSONSync) ExportNodeToJSON(node *types.Node) error {
 	return nil
 }
 
-// importNodesFromDir — сканирует dirPath, ищет *.json,
-// проверяет, есть ли такой MachineKey в БД, если нет — импортирует.
+// SyncNodes выполняет полную синхронизацию между БД и файлами JSON.
+func (njs *NodeJSONSync) SyncNodes() error {
+	// Шаг 1: Обновляем JSON-файлы из БД
+	nodes, err := njs.hsdb.ListNodes()
+	if err != nil {
+		return fmt.Errorf("failed to list nodes from database: %w", err)
+	}
+
+	for _, node := range nodes {
+		err := njs.ExportNodeToJSON(node)
+		if err != nil {
+			log.Error().Err(err).
+				Str("node", node.Hostname).
+				Msg("Failed to export node to JSON")
+		}
+	}
+
+	// Шаг 2: Импортируем ноды из файлов JSON
+	err = njs.importNodesFromDir(njs.ctx, njs.dirPath)
+	if err != nil {
+		return fmt.Errorf("failed to import nodes from JSON directory: %w", err)
+	}
+
+	return nil
+}
+
+// importNodesFromDir импортирует ноды из файлов JSON, обновляя или добавляя их в БД.
 func (njs *NodeJSONSync) importNodesFromDir(ctx context.Context, dirPath string) error {
 	entries, err := os.ReadDir(dirPath)
-	nodesUpdated := false
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			// Папки ещё нет — не страшно, просто выдадим предупреждение
 			log.Warn().
 				Str("dir", dirPath).
 				Msg("JSON import directory does not exist")
@@ -137,52 +184,71 @@ func (njs *NodeJSONSync) importNodesFromDir(ctx context.Context, dirPath string)
 		return fmt.Errorf("cannot read directory %s: %w", dirPath, err)
 	}
 
+	nodesUpdated := false
+
 	for _, entry := range entries {
-		if entry.IsDir() {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
 			continue
 		}
 
-		fileName := entry.Name()
-		if !strings.HasSuffix(fileName, ".json") {
-			continue
-		}
+		fullPath := filepath.Join(dirPath, entry.Name())
 
-		encodedKey := strings.TrimSuffix(fileName, ".json")
-		machineKey, err := decodeMachineKey(encodedKey)
+		var node types.Node
+		raw, err := ioutil.ReadFile(fullPath)
 		if err != nil {
 			log.Error().Err(err).
-				Str("filename", fileName).
-				Msg("Failed to decode machineKey from filename")
+				Str("file", entry.Name()).
+				Msg("Failed to read JSON file")
 			continue
 		}
 
-		// Проверяем, нет ли уже этой ноды
-		_, err = njs.hsdb.GetNodeByMachineKey(machineKey)
-		if err == nil {
-			// Нода уже есть
-			continue
-		}
-		if !errors.Is(err, gorm.ErrRecordNotFound) {
-			// Другая ошибка
+		err = json.Unmarshal(raw, &node)
+		if err != nil {
 			log.Error().Err(err).
-				Str("filename", fileName).
-				Msg("Failed to check node in DB")
+				Str("file", entry.Name()).
+				Msg("Failed to unmarshal JSON file")
 			continue
 		}
 
-		// Если ноды нет — пробуем импортировать
-		fullPath := filepath.Join(dirPath, fileName)
-		if err := njs.importNodeJSON(ctx, fullPath); err != nil {
+		existingNode, err := njs.hsdb.GetNodeByMachineKey(node.MachineKey)
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 			log.Error().Err(err).
-				Str("filename", fileName).
-				Msg("Failed to import node from JSON")
+				Str("machine_key", node.MachineKey.ShortString()).
+				Msg("Failed to fetch node from database")
+			continue
+		}
+
+		if existingNode != nil {
+			// Обновляем ноду только если UpdatedAt в JSON более новый
+			if node.UpdatedAt.After(existingNode.UpdatedAt) {
+				node.ID = existingNode.ID // сохраняем ID из БД
+				_, err := njs.hsdb.RegisterNode(node, node.IPv4, node.IPv6)
+				if err != nil {
+					log.Error().Err(err).
+						Str("machine_key", node.MachineKey.ShortString()).
+						Msg("Failed to update node in database")
+				} else {
+					nodesUpdated = true
+				}
+			}
 		} else {
-			nodesUpdated = true
+			// Добавляем новую ноду
+			node.ID = 0
+			_, err := njs.hsdb.RegisterNode(node, node.IPv4, node.IPv6)
+			if err != nil {
+				log.Error().Err(err).
+					Str("machine_key", node.MachineKey.ShortString()).
+					Msg("Failed to register new node in database")
+			} else {
+				nodesUpdated = true
+			}
 		}
 	}
+
 	if nodesUpdated && njs.onNodesImported != nil {
 		njs.onNodesImported()
 	}
+
 	return nil
 }
 
