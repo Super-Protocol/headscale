@@ -489,10 +489,14 @@ func nodesToProto(polMan policy.PolicyManager, isLikelyConnected *xsync.MapOf[ty
 	for index, node := range nodes {
 		resp := node.Proto()
 
-		// Populate the online field based on
-		// currently connected nodes.
-		if val, ok := isLikelyConnected.Load(node.ID); ok && val {
-			resp.Online = true
+		if node.RegisterMethod != util.RegisterMethodImport {
+			// Populate the online field based on
+			// currently connected nodes.
+			if val, ok := isLikelyConnected.Load(node.ID); ok && val {
+				resp.Online = true
+			}
+		} else {
+			resp.Online = node.IsOnline != nil && *node.IsOnline
 		}
 
 		tags := polMan.Tags(node)

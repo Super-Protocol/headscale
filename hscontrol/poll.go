@@ -3,6 +3,7 @@ package hscontrol
 import (
 	"context"
 	"fmt"
+	"github.com/juanfont/headscale/hscontrol/util"
 	"math/rand/v2"
 	"net/http"
 	"net/netip"
@@ -441,7 +442,7 @@ func (m *mapSession) handleEndpointUpdate() {
 
 	change := m.node.PeerChangeFromMapRequest(m.req)
 
-	online := m.h.nodeNotifier.IsLikelyConnected(m.node.ID)
+	online := m.node.RegisterMethod != util.RegisterMethodImport && m.h.nodeNotifier.IsLikelyConnected(m.node.ID) || m.node.IsOnline != nil && *m.node.IsOnline
 	change.Online = &online
 
 	m.node.ApplyPeerChange(&change)

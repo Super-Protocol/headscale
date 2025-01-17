@@ -90,12 +90,65 @@ type Node struct {
 	UpdatedAt time.Time
 	DeletedAt *time.Time
 
-	IsOnline *bool `gorm:"-"`
+	IsOnline *bool `sql:"DEFAULT:NULL"`
 }
 
 type (
 	Nodes []*Node
 )
+
+func compareEndpoints(endpoints1, endpoints2 []netip.AddrPort) bool {
+	if len(endpoints1) != len(endpoints2) {
+		return false
+	}
+
+	for i := range endpoints1 {
+		if endpoints1[i] != endpoints2[i] {
+			return false
+		}
+	}
+
+	return true
+}
+
+func (node *Node) DiffersFrom(anotherNode *Node) bool {
+	if node.NodeKey != anotherNode.NodeKey ||
+		node.MachineKey != anotherNode.MachineKey ||
+		node.DiscoKey != anotherNode.DiscoKey ||
+		node.Hostname != anotherNode.Hostname {
+		return true
+	}
+
+	if node.IsOnline != nil && anotherNode.IsOnline != nil {
+		if *node.IsOnline != *anotherNode.IsOnline {
+			return true
+		}
+	} else if node.IsOnline != anotherNode.IsOnline { // Один из указателей nil
+		return true
+	}
+
+	if node.IPv4 != nil && anotherNode.IPv4 != nil {
+		if *node.IPv4 != *anotherNode.IPv4 {
+			return true
+		}
+	} else if node.IPv4 != anotherNode.IPv4 { // Один из указателей nil
+		return true
+	}
+
+	if node.IPv6 != nil && anotherNode.IPv6 != nil {
+		if *node.IPv6 != *anotherNode.IPv6 {
+			return true
+		}
+	} else if node.IPv6 != anotherNode.IPv6 { // Один из указателей nil
+		return true
+	}
+
+	if !compareEndpoints(node.Endpoints, anotherNode.Endpoints) {
+		return true
+	}
+
+	return false
+}
 
 // GivenNameHasBeenChanged returns whether the `givenName` can be automatically changed based on the `Hostname` of the node.
 func (node *Node) GivenNameHasBeenChanged() bool {

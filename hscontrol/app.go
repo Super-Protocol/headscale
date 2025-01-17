@@ -234,15 +234,9 @@ func NewHeadscale(cfg *types.Config) (*Headscale, error) {
 	if cfg.NodesSync.Enabled {
 		nodeSync, err := db.NewNodeJSONSync(
 			app.db,
+			app.nodeNotifier,
 			cfg.NodesSync.SyncDir,
 			time.Duration(cfg.NodesSync.SyncInterval)*time.Second,
-			func() {
-				err = nodesChangedHook(app.db, app.polMan, app.nodeNotifier)
-				if err != nil {
-					log.Error().Err(err).
-						Msg("Can't notify nodes after nodes import from files")
-				}
-			},
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to start NodeJSONSync: %w", err)
@@ -698,8 +692,8 @@ func (h *Headscale) Serve() error {
 
 	// Start the local gRPC server without TLS and without authentication
 	grpcSocket := grpc.NewServer(
-	// Uncomment to debug grpc communication.
-	// zerolog.UnaryInterceptor(),
+		// Uncomment to debug grpc communication.
+		// zerolog.UnaryInterceptor(),
 	)
 
 	v1.RegisterHeadscaleServiceServer(grpcSocket, newHeadscaleV1APIServer(h))

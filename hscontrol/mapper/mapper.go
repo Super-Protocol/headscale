@@ -477,6 +477,9 @@ func (m *Mapper) ListPeers(nodeID types.NodeID) (types.Nodes, error) {
 	}
 
 	for _, peer := range peers {
+		if peer.RegisterMethod == util.RegisterMethodImport {
+			continue
+		}
 		online := m.notif.IsLikelyConnected(peer.ID)
 		peer.IsOnline = &online
 	}

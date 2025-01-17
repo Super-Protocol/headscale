@@ -80,6 +80,28 @@ func ListNodes(tx *gorm.DB) (types.Nodes, error) {
 	return nodes, nil
 }
 
+func (hsdb *HSDatabase) ListLocalNodes() (types.Nodes, error) {
+	return Read(hsdb.DB, func(rx *gorm.DB) (types.Nodes, error) {
+		return ListLocalNodes(rx)
+	})
+}
+
+func ListLocalNodes(tx *gorm.DB) (types.Nodes, error) {
+	nodes := types.Nodes{}
+	if err := tx.
+		Preload("AuthKey").
+		Preload("AuthKey.User").
+		Preload("User").
+		Preload("Routes").
+		Find(&nodes).
+		Where(`"register_method" != 'import'`).
+		Error; err != nil {
+		return nil, err
+	}
+
+	return nodes, nil
+}
+
 func (hsdb *HSDatabase) ListEphemeralNodes() (types.Nodes, error) {
 	return Read(hsdb.DB, func(rx *gorm.DB) (types.Nodes, error) {
 		nodes := types.Nodes{}
@@ -128,6 +150,29 @@ func GetNodeByID(tx *gorm.DB, id types.NodeID) (*types.Node, error) {
 		Preload("User").
 		Preload("Routes").
 		Find(&types.Node{ID: id}).First(&mach); result.Error != nil {
+		return nil, result.Error
+	}
+
+	return &mach, nil
+}
+
+func (hsdb *HSDatabase) GetNodeByHostName(hostname string) (*types.Node, error) {
+	return Read(hsdb.DB, func(rx *gorm.DB) (*types.Node, error) {
+		return GetNodeByHostName(rx, hostname)
+	})
+}
+
+func GetNodeByHostName(
+	tx *gorm.DB,
+	hostname string,
+) (*types.Node, error) {
+	mach := types.Node{}
+	if result := tx.
+		Preload("AuthKey").
+		Preload("AuthKey.User").
+		Preload("User").
+		Preload("Routes").
+		First(&mach, "hostname = ?", hostname); result.Error != nil {
 		return nil, result.Error
 	}
 
