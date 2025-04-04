@@ -68,7 +68,8 @@ type Config struct {
 
 	Database DatabaseConfig
 
-	NodesSync NodesSyncConfig
+	NodesSync    NodesSyncConfig
+	NodeExchange NodeExchangeConfig
 
 	DERP DERPConfig
 
@@ -210,6 +211,17 @@ type NodesSyncConfig struct {
 	Enabled      bool
 	SyncDir      string
 	SyncInterval uint64
+}
+
+type NodeExchangeConfig struct {
+	Enabled        bool
+	ServerPort     string
+	CertFile       string
+	KeyFile        string
+	CaCertPath     string
+	AdvertiseHost  string
+	PollInterval   uint64
+	InitialHsNodes []string
 }
 
 type LogTailConfig struct {
@@ -525,6 +537,21 @@ func nodesSyncConfig() NodesSyncConfig {
 	cfg.Enabled = viper.GetBool("nodes_sync.enabled")
 	cfg.SyncDir = viper.GetString("nodes_sync.sync_dir")
 	cfg.SyncInterval = viper.GetUint64("nodes_sync.sync_interval")
+
+	return cfg
+}
+
+func nodesExchangeConfig() NodeExchangeConfig {
+	var cfg NodeExchangeConfig
+
+	cfg.Enabled = viper.GetBool("node_exchange.enabled")
+	cfg.CertFile = viper.GetString("node_exchange.cert_file")
+	cfg.KeyFile = viper.GetString("node_exchange.key_file")
+	cfg.InitialHsNodes = viper.GetStringSlice("node_exchange.initial_hs_nodes")
+	cfg.AdvertiseHost = viper.GetString("node_exchange.advertise_host")
+	cfg.CaCertPath = viper.GetString("node_exchange.ca_cert_path")
+	cfg.PollInterval = viper.GetUint64("node_exchange.poll_interval")
+	cfg.ServerPort = viper.GetString("node_exchange.server_port")
 
 	return cfg
 }
@@ -904,6 +931,10 @@ func LoadServerConfig() (*Config, error) {
 
 	nodesSync := nodesSyncConfig()
 
+	nodeExchange := nodesExchangeConfig()
+
+	log.Debug().Msgf("Remote: %s", nodeExchange.InitialHsNodes)
+
 	return &Config{
 		ServerURL:          serverURL,
 		Addr:               viper.GetString("listen_addr"),
@@ -921,7 +952,8 @@ func LoadServerConfig() (*Config, error) {
 		),
 		BaseDomain: dnsConfig.BaseDomain,
 
-		NodesSync: nodesSync,
+		NodesSync:    nodesSync,
+		NodeExchange: nodeExchange,
 
 		DERP: derpConfig,
 

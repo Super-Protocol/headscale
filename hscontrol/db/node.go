@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/google/uuid"
 	"net/netip"
 	"slices"
 	"sort"
@@ -173,6 +174,29 @@ func GetNodeByHostName(
 		Preload("User").
 		Preload("Routes").
 		First(&mach, "hostname = ?", hostname); result.Error != nil {
+		return nil, result.Error
+	}
+
+	return &mach, nil
+}
+
+func (hsdb *HSDatabase) GetNodeByGlobalId(globalId string) (*types.Node, error) {
+	return Read(hsdb.DB, func(rx *gorm.DB) (*types.Node, error) {
+		return GetNodeByGlobalId(rx, globalId)
+	})
+}
+
+func GetNodeByGlobalId(
+	tx *gorm.DB,
+	globalId string,
+) (*types.Node, error) {
+	mach := types.Node{}
+	if result := tx.
+		Preload("AuthKey").
+		Preload("AuthKey.User").
+		Preload("User").
+		Preload("Routes").
+		First(&mach, "global_id = ?", globalId); result.Error != nil {
 		return nil, result.Error
 	}
 
@@ -465,6 +489,8 @@ func RegisterNode(tx *gorm.DB, node types.Node, ipv4 *netip.Addr, ipv6 *netip.Ad
 
 		node.GivenName = givenName
 	}
+
+	node.GlobalId = uuid.New().String()
 
 	if err := tx.Save(&node).Error; err != nil {
 		return nil, fmt.Errorf("failed register(save) node in the database: %w", err)

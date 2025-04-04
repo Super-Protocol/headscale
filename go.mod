@@ -15,6 +15,7 @@ require (
 	github.com/gofrs/uuid/v5 v5.3.0
 	github.com/google/go-cmp v0.6.0
 	github.com/gorilla/mux v1.8.1
+	github.com/gorilla/websocket v1.5.3
 	github.com/grpc-ecosystem/go-grpc-middleware v1.4.0
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.24.0
 	github.com/jagottsicher/termcolor v1.0.2

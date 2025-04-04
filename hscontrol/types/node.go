@@ -3,6 +3,7 @@ package types
 import (
 	"errors"
 	"fmt"
+	"github.com/rs/zerolog/log"
 	"net/netip"
 	"strconv"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/juanfont/headscale/hscontrol/util"
 	"go4.org/netipx"
 	"google.golang.org/protobuf/types/known/timestamppb"
+	"gorm.io/gorm"
 	"tailscale.com/tailcfg"
 	"tailscale.com/types/key"
 )
@@ -59,6 +61,9 @@ type Node struct {
 	IPv4 *netip.Addr `gorm:"column:ipv4;serializer:text"`
 	IPv6 *netip.Addr `gorm:"column:ipv6;serializer:text"`
 
+	// GlobalId is UUID generated for each node
+	GlobalId string `gorm:"type:varchar(255);unique_index"`
+
 	// Hostname represents the name given by the Tailscale
 	// client during registration
 	Hostname string
@@ -88,6 +93,7 @@ type Node struct {
 
 	CreatedAt time.Time
 	UpdatedAt time.Time
+	Revision  uint64 `gorm:"default:0"`
 	DeletedAt *time.Time
 
 	IsOnline *bool `sql:"DEFAULT:NULL"`
@@ -487,4 +493,14 @@ func (nodes Nodes) IDMap() map[NodeID]*Node {
 	}
 
 	return ret
+}
+
+func (node *Node) BeforeUpdate(tx *gorm.DB) (err error) {
+	log.Debug().Msgf("Node BeforeUpdate hook")
+	if skip, ok := tx.Get("skip_revision_increment"); ok && skip.(bool) {
+		log.Debug().Msgf("Revision update skipped")
+		return nil
+	}
+	node.Revision++
+	return nil
 }
