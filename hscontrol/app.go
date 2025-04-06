@@ -248,13 +248,25 @@ func NewHeadscale(cfg *types.Config) (*Headscale, error) {
 	if cfg.NodeExchange.Enabled {
 		log.Debug().Msgf("NodeExchange Enabled")
 
+		var remoteNodes []RemoteNodeConfig
+		for _, node := range cfg.NodeExchange.InitialHsNodes {
+			log.Debug().Msgf("Initial Node %s: %s:%s", node.ID, node.Host, node.Port)
+
+			remoteNodes = append(remoteNodes, RemoteNodeConfig{
+				ID:   node.ID,
+				Host: node.Host,
+				Port: node.Port,
+			})
+		}
+
 		exchangeCfg := NodeExchangeConfig{
 			Port:         cfg.NodeExchange.ServerPort,
 			CertFile:     cfg.NodeExchange.CertFile,
 			KeyFile:      cfg.NodeExchange.KeyFile,
 			CACertPath:   cfg.NodeExchange.CaCertPath,
-			RemoteNodes:  cfg.NodeExchange.InitialHsNodes,
+			RemoteNodes:  remoteNodes,
 			PollInterval: time.Duration(cfg.NodeExchange.PollInterval) * time.Second,
+			ID:           cfg.NodeExchange.ID,
 		}
 		nodeExchange := NewNodeExchange(app.db, exchangeCfg)
 		nodeExchange.Start()
@@ -707,8 +719,8 @@ func (h *Headscale) Serve() error {
 
 	// Start the local gRPC server without TLS and without authentication
 	grpcSocket := grpc.NewServer(
-	// Uncomment to debug grpc communication.
-	// zerolog.UnaryInterceptor(),
+		// Uncomment to debug grpc communication.
+		// zerolog.UnaryInterceptor(),
 	)
 
 	v1.RegisterHeadscaleServiceServer(grpcSocket, newHeadscaleV1APIServer(h))

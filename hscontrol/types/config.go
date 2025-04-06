@@ -213,15 +213,22 @@ type NodesSyncConfig struct {
 	SyncInterval uint64
 }
 
+type NodeExchangeNodeInfo struct {
+	ID   string `json:"id"`
+	Host string `json:"host"`
+	Port string `json:"port"`
+}
+
 type NodeExchangeConfig struct {
 	Enabled        bool
+	ID             string
 	ServerPort     string
 	CertFile       string
 	KeyFile        string
 	CaCertPath     string
 	AdvertiseHost  string
 	PollInterval   uint64
-	InitialHsNodes []string
+	InitialHsNodes []NodeExchangeNodeInfo
 }
 
 type LogTailConfig struct {
@@ -547,11 +554,16 @@ func nodesExchangeConfig() NodeExchangeConfig {
 	cfg.Enabled = viper.GetBool("node_exchange.enabled")
 	cfg.CertFile = viper.GetString("node_exchange.cert_file")
 	cfg.KeyFile = viper.GetString("node_exchange.key_file")
-	cfg.InitialHsNodes = viper.GetStringSlice("node_exchange.initial_hs_nodes")
 	cfg.AdvertiseHost = viper.GetString("node_exchange.advertise_host")
 	cfg.CaCertPath = viper.GetString("node_exchange.ca_cert_path")
 	cfg.PollInterval = viper.GetUint64("node_exchange.poll_interval")
 	cfg.ServerPort = viper.GetString("node_exchange.server_port")
+	cfg.ID = viper.GetString("node_exchange.id")
+
+	err := viper.UnmarshalKey("node_exchange.initial_hs_nodes", &cfg.InitialHsNodes)
+	if err != nil {
+		log.Fatal().Err(err).Msg("Unable to parse node_exchange.initial_hs_nodes")
+	}
 
 	return cfg
 }

@@ -11,7 +11,7 @@ import (
 	"io/ioutil"
 	"net"
 	"net/http"
-	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,21 +23,32 @@ import (
 	"gorm.io/gorm"
 )
 
+// RemoteNodeConfig holds the configuration for a remote headscale node.
+type RemoteNodeConfig struct {
+	ID   string `json:"id"`
+	Host string `json:"host"`
+	Port string `json:"port"`
+}
+
 // NodeExchangeConfig holds configuration parameters for the node sync service.
 type NodeExchangeConfig struct {
-	Port          string        // e.g. ":8443"
-	CertFile      string        // server certificate file
-	KeyFile       string        // server key file
-	CACertPath    string        // CA certificate file (used for mutual TLS)
-	RemoteNodes   []string      // initial list of remote headscale node URLs (e.g. "https://node1.example.com:8443")
-	PollInterval  time.Duration // interval between polling remote nodes
+	Port          string             // e.g. ":8443"
+	CertFile      string             // server certificate file
+	KeyFile       string             // server key file
+	CACertPath    string             // CA certificate file (used for mutual TLS)
+	RemoteNodes   []RemoteNodeConfig // initial list of remote headscale nodes with id, host and port
+	PollInterval  time.Duration      // interval between polling remote nodes
 	AdvertiseHost string
+	ID            string // local node unique id
 }
 
 type RemoteNodeInfo struct {
+	ID          string    `json:"id"`
 	Host        string    `json:"host"`
 	Port        string    `json:"port"`
 	AvailableAt time.Time `json:"availableAt"`
+	BanUntil    time.Time `json:"-"`
+	BanFibIndex int       `json:"-"`
 }
 
 // NodeExchange is responsible for both serving local API endpoints
@@ -50,6 +61,9 @@ type NodeExchange struct {
 	ctx           context.Context
 	cancel        context.CancelFunc
 	server        *http.Server
+
+	pingLatencies map[string]time.Duration
+	pingMu        sync.Mutex
 }
 
 // NewNodeExchange creates a new NodeExchange instance.
@@ -58,29 +72,23 @@ func NewNodeExchange(hsdb *db.HSDatabase, config NodeExchangeConfig) *NodeExchan
 	// Make a copy of the initial remote nodes.
 
 	remoteNodes := make(map[string]RemoteNodeInfo)
-	for _, urlStr := range config.RemoteNodes {
-		u, err := url.Parse(urlStr)
-		if err != nil {
-			log.Printf("Error parsing remote node URL %s: %v", urlStr, err)
-			continue
-		}
-		host, port, err := net.SplitHostPort(u.Host)
-		if err != nil {
-			host = u.Host
-			port = ""
-		}
-		remoteNodes[urlStr] = RemoteNodeInfo{
-			Host:        host,
-			Port:        port,
+	for _, rn := range config.RemoteNodes {
+		remoteNodes[rn.ID] = RemoteNodeInfo{
+			ID:          rn.ID,
+			Host:        rn.Host,
+			Port:        rn.Port,
 			AvailableAt: time.Now(),
+			BanUntil:    time.Time{}, // reset ban
+			BanFibIndex: 0,           // reset ban counter
 		}
 	}
 	return &NodeExchange{
-		hsdb:        hsdb,
-		config:      config,
-		remoteNodes: remoteNodes,
-		ctx:         ctx,
-		cancel:      cancel,
+		hsdb:          hsdb,
+		config:        config,
+		remoteNodes:   remoteNodes,
+		pingLatencies: make(map[string]time.Duration),
+		ctx:           ctx,
+		cancel:        cancel,
 	}
 }
 
@@ -93,6 +101,7 @@ func (ns *NodeExchange) startServer() {
 	// Endpoint to return the list of known headscale nodes.
 	router.HandleFunc("/api/headscale/nodes", ns.handleGetHeadscaleNodes).Methods("GET")
 	router.HandleFunc("/api/headscale/advertise", ns.advertiseHandler).Methods("POST")
+	router.HandleFunc("/api/headscale/ping", ns.handlePing).Methods("GET")
 
 	// Load the CA certificate for client verification.
 	caCertPool, err := loadCACertPool(ns.config.CACertPath)
@@ -147,6 +156,7 @@ func (ns *NodeExchange) handleGetHeadscaleNodes(w http.ResponseWriter, r *http.R
 
 func (ns *NodeExchange) advertiseHandler(w http.ResponseWriter, r *http.Request) {
 	type AdvertiseRequest struct {
+		ID   string `json:"id"`
 		Host string `json:"ip"`
 		Port string `json:"port"`
 	}
@@ -163,23 +173,36 @@ func (ns *NodeExchange) advertiseHandler(w http.ResponseWriter, r *http.Request)
 		}
 		req.Host = host
 	}
-	advertisedURL := fmt.Sprintf("https://%s:%s", req.Host, req.Port)
+	req.Port = strings.TrimPrefix(req.Port, ":")
+	// IPv6 corrections
+	if strings.Contains(req.Host, ":") && !strings.HasPrefix(req.Host, "[") {
+		req.Host = fmt.Sprintf("[%s]", req.Host)
+	}
 
 	ns.remoteNodesMu.Lock()
 	defer ns.remoteNodesMu.Unlock()
-	ns.remoteNodes[advertisedURL] = RemoteNodeInfo{
+	ns.remoteNodes[req.ID] = RemoteNodeInfo{
+		ID:          req.ID,
 		Host:        req.Host,
 		Port:        req.Port,
 		AvailableAt: time.Now(),
+		BanUntil:    time.Time{}, // reset ban
+		BanFibIndex: 0,           // reset ban counter
 	}
 	w.WriteHeader(http.StatusOK)
 }
 
-func (ns *NodeExchange) advertiseToRemote(remoteURL string) error {
-	advertiseURL := remoteURL + "/api/headscale/advertise"
+func (ns *NodeExchange) handlePing(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+func (ns *NodeExchange) advertiseToRemote(id string, info RemoteNodeInfo) error {
+	advertiseURL := fmt.Sprintf("https://%s:%s/api/headscale/advertise", info.Host, info.Port)
 	payload := map[string]string{
+		"id":   ns.config.ID,
 		"host": ns.config.AdvertiseHost,
-		"port": ns.config.Port,
+		"port": strings.TrimPrefix(ns.config.Port, ":"),
 	}
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
@@ -199,21 +222,40 @@ func (ns *NodeExchange) advertiseToRemote(remoteURL string) error {
 
 	resp, err := client.Do(req)
 	if err != nil {
+		ns.banNode(id)
 		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := ioutil.ReadAll(resp.Body)
+		ns.banNode(id)
 		return fmt.Errorf("unexpected status %d: %s", resp.StatusCode, string(bodyBytes))
 	} else {
 		ns.remoteNodesMu.Lock()
-		if info, ok := ns.remoteNodes[remoteURL]; ok {
-			info.AvailableAt = time.Now()
-			ns.remoteNodes[remoteURL] = info
+		if nodeInfo, ok := ns.remoteNodes[id]; ok {
+			nodeInfo.AvailableAt = time.Now()
+			ns.remoteNodes[id] = nodeInfo
 		}
 		ns.remoteNodesMu.Unlock()
 	}
 	return nil
+}
+
+func (ns *NodeExchange) pingNode(client *http.Client, id string, info RemoteNodeInfo) {
+	url := fmt.Sprintf("https://%s:%s/api/headscale/ping", info.Host, info.Port)
+	start := time.Now()
+	resp, err := client.Get(url)
+	if err != nil {
+		log.Printf("Error pinging %s: %v", url, err)
+		return
+	}
+	defer resp.Body.Close()
+	latency := time.Since(start)
+
+	ns.pingMu.Lock()
+	ns.pingLatencies[id] = latency
+	ns.pingMu.Unlock()
+	log.Printf("Ping to node %s: %v", id, latency)
 }
 
 // pollRemoteNodes periodically connects to each remote headscale node,
@@ -237,22 +279,31 @@ func (ns *NodeExchange) pollRemoteNodes() {
 			return
 		case <-ticker.C:
 			ns.remoteNodesMu.Lock()
-			remoteList := make([]string, 0, len(ns.remoteNodes))
-			for url, info := range ns.remoteNodes {
+			var nodesToPoll []struct {
+				id   string
+				info RemoteNodeInfo
+			}
+			for id, info := range ns.remoteNodes {
+				if time.Now().Before(info.BanUntil) {
+					log.Printf("Skipping banned node %s until %v", id, info.BanUntil)
+					continue
+				}
 				if time.Since(info.AvailableAt) <= time.Hour {
-					remoteList = append(remoteList, url)
+					nodesToPoll = append(nodesToPoll, struct {
+						id   string
+						info RemoteNodeInfo
+					}{id, info})
 				}
 			}
 			ns.remoteNodesMu.Unlock()
 
-			for _, remoteURL := range remoteList {
-				// Poll tailscale nodes from the remote headscale node.
-				ns.pollRemoteTailscaleNodes(client, remoteURL)
-				// Poll known headscale nodes from the remote headscale node.
-				ns.pollRemoteHeadscaleNodes(client, remoteURL)
-				if err := ns.advertiseToRemote(remoteURL); err != nil {
-					log.Printf("Error advertising to remote node %s: %v", remoteURL, err)
+			for _, node := range nodesToPoll {
+				ns.pollRemoteTailscaleNodes(client, node.id, node.info)
+				ns.pollRemoteHeadscaleNodes(client, node.id, node.info)
+				if err := ns.advertiseToRemote(node.id, node.info); err != nil {
+					log.Printf("Error advertising to remote node %s: %v", node.id, err)
 				}
+				ns.pingNode(client, node.id, node.info)
 			}
 		}
 	}
@@ -260,12 +311,13 @@ func (ns *NodeExchange) pollRemoteNodes() {
 
 // pollRemoteTailscaleNodes retrieves tailscale node information from a remote headscale node
 // and adds any new nodes to the local database.
-func (ns *NodeExchange) pollRemoteTailscaleNodes(client *http.Client, remoteURL string) {
-	log.Debug().Msgf("pollRemoteTailscaleNodes: %s", remoteURL)
-	url := remoteURL + "/api/tailscale/nodes"
+func (ns *NodeExchange) pollRemoteTailscaleNodes(client *http.Client, id string, info RemoteNodeInfo) {
+	log.Debug().Msgf("pollRemoteTailscaleNodes: %s", id)
+	url := fmt.Sprintf("https://%s:%s/api/tailscale/nodes", info.Host, info.Port)
 	resp, err := client.Get(url)
 	if err != nil {
 		log.Printf("Error polling %s: %v", url, err)
+		ns.banNode(id)
 		return
 	}
 	defer resp.Body.Close()
@@ -273,13 +325,14 @@ func (ns *NodeExchange) pollRemoteTailscaleNodes(client *http.Client, remoteURL 
 	var remoteNodes []types.Node
 	if err := json.NewDecoder(resp.Body).Decode(&remoteNodes); err != nil {
 		log.Printf("Error decoding response from %s: %v", url, err)
+		ns.banNode(id)
 		return
 	}
 
 	ns.remoteNodesMu.Lock()
-	if info, ok := ns.remoteNodes[remoteURL]; ok {
-		info.AvailableAt = time.Now()
-		ns.remoteNodes[remoteURL] = info
+	if nodeInfo, ok := ns.remoteNodes[id]; ok {
+		nodeInfo.AvailableAt = time.Now()
+		ns.remoteNodes[id] = nodeInfo
 	}
 	ns.remoteNodesMu.Unlock()
 	// Iterate through the remote tailscale nodes and add any unknown ones.
@@ -324,11 +377,12 @@ func (ns *NodeExchange) pollRemoteTailscaleNodes(client *http.Client, remoteURL 
 
 // pollRemoteHeadscaleNodes retrieves the list of known headscale nodes from a remote headscale node
 // and adds any new entries to the local remote node list.
-func (ns *NodeExchange) pollRemoteHeadscaleNodes(client *http.Client, remoteURL string) {
-	url := remoteURL + "/api/headscale/nodes"
+func (ns *NodeExchange) pollRemoteHeadscaleNodes(client *http.Client, id string, info RemoteNodeInfo) {
+	url := fmt.Sprintf("https://%s:%s/api/headscale/nodes", info.Host, info.Port)
 	resp, err := client.Get(url)
 	if err != nil {
 		log.Printf("Error polling %s: %v", url, err)
+		ns.banNode(id)
 		return
 	}
 	defer resp.Body.Close()
@@ -336,30 +390,24 @@ func (ns *NodeExchange) pollRemoteHeadscaleNodes(client *http.Client, remoteURL 
 	var remoteHeadscaleNodes map[string]RemoteNodeInfo
 	if err := json.NewDecoder(resp.Body).Decode(&remoteHeadscaleNodes); err != nil {
 		log.Printf("Error decoding headscale nodes from %s: %v", url, err)
+		ns.banNode(id)
 		return
 	}
 	ns.remoteNodesMu.Lock()
 	defer ns.remoteNodesMu.Unlock()
-	for url, info := range remoteHeadscaleNodes {
-		if existing, ok := ns.remoteNodes[url]; ok {
-			if info.AvailableAt.After(existing.AvailableAt) {
-				ns.remoteNodes[url] = info
+	for nodeID, nodeInfo := range remoteHeadscaleNodes {
+		if nodeID == ns.config.ID {
+			continue
+		}
+		if existing, ok := ns.remoteNodes[nodeID]; ok {
+			if nodeInfo.AvailableAt.After(existing.AvailableAt) {
+				ns.remoteNodes[nodeID] = nodeInfo
 			}
 		} else {
-			log.Printf("Discovered new remote headscale node: %s", url)
-			ns.remoteNodes[url] = info
+			log.Printf("Discovered new remote headscale node: %s", nodeID)
+			ns.remoteNodes[nodeID] = nodeInfo
 		}
 	}
-}
-
-// contains checks if a slice contains a given string.
-func contains(slice []string, s string) bool {
-	for _, v := range slice {
-		if v == s {
-			return true
-		}
-	}
-	return false
 }
 
 // loadCACertPool loads a CA certificate file into an x509.CertPool.
@@ -392,10 +440,55 @@ func newMutualTLSClient(caCertPath, certFile, keyFile string) (*http.Client, err
 	tlsConfig := &tls.Config{
 		Certificates:       []tls.Certificate{clientCert},
 		RootCAs:            caCertPool,
-		InsecureSkipVerify: false,
+		InsecureSkipVerify: true,
+		VerifyPeerCertificate: func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+			certs := make([]*x509.Certificate, len(rawCerts))
+			for i, asn1Data := range rawCerts {
+				cert, err := x509.ParseCertificate(asn1Data)
+				if err != nil {
+					return err
+				}
+				certs[i] = cert
+			}
+			opts := x509.VerifyOptions{
+				Roots:       caCertPool,
+				CurrentTime: time.Now(),
+			}
+			_, err := certs[0].Verify(opts)
+			return err
+		},
 	}
 	transport := &http.Transport{TLSClientConfig: tlsConfig}
 	return &http.Client{Transport: transport, Timeout: 10 * time.Second}, nil
+}
+
+func fibonacciBan(n int) time.Duration {
+	if n < 0 {
+		panic("Index must be positive")
+	}
+	if n == 0 {
+		return 0
+	} else if n == 1 {
+		return 1
+	}
+
+	a, b := 0, 1
+	for i := 2; i <= n; i++ {
+		a, b = b, a+b
+	}
+	return time.Duration(b) * time.Second
+}
+
+func (ns *NodeExchange) banNode(id string) {
+	ns.remoteNodesMu.Lock()
+	defer ns.remoteNodesMu.Unlock()
+	if node, ok := ns.remoteNodes[id]; ok {
+		node.BanFibIndex++
+		dur := fibonacciBan(node.BanFibIndex)
+		node.BanUntil = time.Now().Add(dur)
+		ns.remoteNodes[id] = node
+		log.Printf("Banned node %s for %v", id, dur)
+	}
 }
 
 // Start launches both the HTTPS server and the remote polling goroutine.
