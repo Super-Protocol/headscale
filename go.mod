@@ -9,13 +9,14 @@ require (
 	github.com/coder/websocket v1.8.12
 	github.com/coreos/go-oidc/v3 v3.11.0
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc
+	github.com/dgraph-io/dgo/v240 v240.2.0
 	github.com/fsnotify/fsnotify v1.8.0
 	github.com/glebarez/sqlite v1.11.0
 	github.com/go-gormigrate/gormigrate/v2 v2.1.3
 	github.com/gofrs/uuid/v5 v5.3.0
 	github.com/google/go-cmp v0.6.0
+	github.com/google/uuid v1.6.0
 	github.com/gorilla/mux v1.8.1
-	github.com/gorilla/websocket v1.5.3
 	github.com/grpc-ecosystem/go-grpc-middleware v1.4.0
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.24.0
 	github.com/jagottsicher/termcolor v1.0.2
@@ -38,14 +39,15 @@ require (
 	github.com/tailscale/tailsql v0.0.0-20241211062219-bf96884c6a49
 	github.com/tcnksm/go-latest v0.0.0-20170313132115-e3007ae9052e
 	go4.org/netipx v0.0.0-20231129151722-fdeea329fbba
-	golang.org/x/crypto v0.31.0
+	golang.org/x/crypto v0.36.0
 	golang.org/x/exp v0.0.0-20241215155358-4a5509556b9e
-	golang.org/x/net v0.32.0
-	golang.org/x/oauth2 v0.24.0
-	golang.org/x/sync v0.10.0
-	google.golang.org/genproto/googleapis/api v0.0.0-20241216192217-9240e9c98484
-	google.golang.org/grpc v1.69.0
-	google.golang.org/protobuf v1.36.0
+	golang.org/x/net v0.38.0
+	golang.org/x/oauth2 v0.25.0
+	golang.org/x/sync v0.13.0
+	gonum.org/v1/gonum v0.16.0
+	google.golang.org/genproto/googleapis/api v0.0.0-20250106144421-5f5ef82da422
+	google.golang.org/grpc v1.71.1
+	google.golang.org/protobuf v1.36.6
 	gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c
 	gopkg.in/yaml.v3 v3.0.1
 	gorm.io/driver/postgres v1.5.11
@@ -138,7 +140,6 @@ require (
 	github.com/google/nftables v0.2.1-0.20240414091927-5e242ec57806 // indirect
 	github.com/google/pprof v0.0.0-20241210010833-40e02aabc2ad // indirect
 	github.com/google/shlex v0.0.0-20191202100458-e7afc7fbc510 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/gookit/color v1.5.4 // indirect
 	github.com/gorilla/csrf v1.7.2 // indirect
 	github.com/gorilla/securecookie v1.1.2 // indirect
@@ -220,14 +221,14 @@ require (
 	go.uber.org/multierr v1.11.0 // indirect
 	go4.org/mem v0.0.0-20220726221520-4f986261bf13 // indirect
 	golang.org/x/mod v0.22.0 // indirect
-	golang.org/x/sys v0.28.0 // indirect
-	golang.org/x/term v0.27.0 // indirect
-	golang.org/x/text v0.21.0 // indirect
+	golang.org/x/sys v0.32.0 // indirect
+	golang.org/x/term v0.30.0 // indirect
+	golang.org/x/text v0.24.0 // indirect
 	golang.org/x/time v0.5.0 // indirect
 	golang.org/x/tools v0.28.0 // indirect
 	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2 // indirect
 	golang.zx2c4.com/wireguard/windows v0.5.3 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20241216192217-9240e9c98484 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20250404141209-ee84b53bf3d0 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	gvisor.dev/gvisor v0.0.0-20240722211153-64c016c92987 // indirect
 )

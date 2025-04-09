@@ -47,3 +47,4 @@ integration_test/etc/config.dump.yaml
 
 __debug_bin
 .tmp
+.codebuddy

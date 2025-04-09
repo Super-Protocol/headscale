@@ -719,8 +719,8 @@ func (h *Headscale) Serve() error {
 
 	// Start the local gRPC server without TLS and without authentication
 	grpcSocket := grpc.NewServer(
-		// Uncomment to debug grpc communication.
-		// zerolog.UnaryInterceptor(),
+	// Uncomment to debug grpc communication.
+	// zerolog.UnaryInterceptor(),
 	)
 
 	v1.RegisterHeadscaleServiceServer(grpcSocket, newHeadscaleV1APIServer(h))
