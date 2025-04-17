@@ -1,0 +1,188 @@
+{
+  "swagger": "2.0",
+  "info": {
+    "title": "dnetwork/v1/dnetwork.proto",
+    "version": "version not set"
+  },
+  "tags": [
+    {
+      "name": "DNetworkService"
+    }
+  ],
+  "consumes": [
+    "application/json"
+  ],
+  "produces": [
+    "application/json"
+  ],
+  "paths": {},
+  "definitions": {
+    "protobufAny": {
+      "type": "object",
+      "properties": {
+        "@type": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": {}
+    },
+    "rpcStatus": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "message": {
+          "type": "string"
+        },
+        "details": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "#/definitions/protobufAny"
+          }
+        }
+      }
+    },
+    "v1DNode": {
+      "type": "object",
+      "properties": {
+        "host": {
+          "type": "string"
+        },
+        "port": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "lastAvailableAt": {
+          "type": "string",
+          "format": "int64"
+        }
+      },
+      "title": "Message representing a node in the network"
+    },
+    "v1GroupConfig": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "size": {
+          "$ref": "#/definitions/v1GroupSize"
+        },
+        "measurements": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "#/definitions/v1GroupCriteria"
+          }
+        }
+      },
+      "title": "Group configuration for forming groups"
+    },
+    "v1GroupCriteria": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "condition": {
+          "type": "string",
+          "title": "e.g., min, max, lt, gt"
+        },
+        "value": {
+          "type": "string",
+          "format": "int64",
+          "title": "Optional value for comparison"
+        }
+      },
+      "title": "Criteria for grouping nodes"
+    },
+    "v1GroupProposalResponse": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "integer",
+          "format": "int32",
+          "title": "Accepted or Rejected"
+        }
+      },
+      "title": "Response for group proposal"
+    },
+    "v1GroupSize": {
+      "type": "object",
+      "properties": {
+        "min": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "max": {
+          "type": "integer",
+          "format": "int32"
+        }
+      },
+      "title": "Group size constraints"
+    },
+    "v1MeasureLatencyResponse": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string"
+        }
+      },
+      "title": "Response for MeasureLatency"
+    },
+    "v1Measurement": {
+      "type": "object",
+      "properties": {
+        "value": {
+          "type": "string",
+          "format": "int64"
+        },
+        "creationTimeUnix": {
+          "type": "string",
+          "format": "uint64"
+        },
+        "expirationTimeUnix": {
+          "type": "string",
+          "format": "uint64"
+        }
+      },
+      "title": "Message representing a measurement"
+    },
+    "v1MeasurementMap": {
+      "type": "object",
+      "properties": {
+        "measurements": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/definitions/v1MeasurementSubMap"
+          }
+        }
+      },
+      "title": "Intermediate message for the second-level map"
+    },
+    "v1MeasurementSubMap": {
+      "type": "object",
+      "properties": {
+        "measurements": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/definitions/v1Measurement"
+          }
+        }
+      },
+      "title": "Intermediate message for the third-level map"
+    },
+    "v1SpreadGossipResponse": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string"
+        }
+      },
+      "title": "Response for spreading gossip"
+    }
+  }
+}

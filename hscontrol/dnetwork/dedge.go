@@ -1,6 +1,7 @@
 package dnetwork
 
 import (
+	"encoding/json"
 	"gonum.org/v1/gonum/graph"
 	"sync"
 )
@@ -11,6 +12,19 @@ type Measurement struct {
 	ExpirationTimeUnix uint64 `json:"expiration_time_unix"`
 }
 
+// MarshalJSON implements custom JSON marshaling for Measurement
+func (m Measurement) MarshalJSON() ([]byte, error) {
+	return json.Marshal(&struct {
+		Value              int64  `json:"value"`
+		CreationTimeUnix   uint64 `json:"creation_time_unix"`
+		ExpirationTimeUnix uint64 `json:"expiration_time_unix"`
+	}{
+		Value:              m.Value,
+		CreationTimeUnix:   m.CreationTimeUnix,
+		ExpirationTimeUnix: m.ExpirationTimeUnix,
+	})
+}
+
 type DEdge struct {
 	from           DNode
 	to             DNode
@@ -19,7 +33,6 @@ type DEdge struct {
 }
 
 func (e *DEdge) ReversedEdge() graph.Edge {
-
 	return &DEdge{
 		from:         e.to,
 		to:           e.from,

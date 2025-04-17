@@ -98,7 +98,7 @@ func (g *GossipInteraction) HandleInfoReceived(receivedNodes []DNode, receivedMe
 	}
 }
 
-func (g *GossipInteraction) GetInfo() (receivedNodes []DNode, receivedMeasurements map[string]map[string]map[string]Measurement) {
+func (g *GossipInteraction) GetInfo() ([]DNode, map[string]map[string]map[string]Measurement) {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 

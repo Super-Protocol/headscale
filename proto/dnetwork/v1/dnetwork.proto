@@ -1,0 +1,87 @@
+syntax = "proto3";
+
+package dnetwork.v1;
+
+option go_package = "github.com/juanfont/headscale/gen/go/dnetwork/v1";
+
+import "google/protobuf/empty.proto";
+
+// Message representing a node in the network
+message DNode {
+  string host = 1;
+  uint32 port = 2;
+  int64 last_available_at = 3;
+}
+
+// Message representing a measurement
+message Measurement {
+  int64 value = 1;
+  uint64 creation_time_unix = 2;
+  uint64 expiration_time_unix = 3;
+}
+
+// Intermediate message for the third-level map
+message MeasurementSubMap {
+  map<string, Measurement> measurements = 1;
+}
+
+// Intermediate message for the second-level map
+message MeasurementMap {
+  map<string, MeasurementSubMap> measurements = 1;
+}
+
+// Request for spreading gossip with nested maps restructured
+message SpreadGossipRequest {
+  repeated DNode nodes = 1;
+  map<string, MeasurementMap> measurements = 2;
+}
+
+// Response for spreading gossip
+message SpreadGossipResponse {
+  string status = 1;
+}
+
+// gRPC service definition for DNetwork
+service DNetworkService {
+  rpc SpreadGossip(SpreadGossipRequest) returns (SpreadGossipResponse);
+  rpc MeasureLatency(google.protobuf.Empty) returns (MeasureLatencyResponse);
+  // Request for proposing group formation
+  rpc ProposeGroupFormation(GroupProposalRequest) returns (GroupProposalResponse);
+}
+
+// Response for MeasureLatency
+message MeasureLatencyResponse {
+  string status = 1;
+}
+
+// Request for proposing group formation
+message GroupProposalRequest {
+  DNode proposing_node = 1;
+  GroupConfig group_config = 2;
+  repeated string nodes_connected = 3;
+}
+
+// Response for group proposal
+message GroupProposalResponse {
+  int32 status = 1; // Accepted or Rejected
+}
+
+// Group configuration for forming groups
+message GroupConfig {
+  string name = 1;
+  GroupSize size = 2;
+  repeated GroupCriteria measurements = 3;
+}
+
+// Group size constraints
+message GroupSize {
+  int32 min = 1;
+  int32 max = 2;
+}
+
+// Criteria for grouping nodes
+message GroupCriteria {
+  string name = 1;
+  string condition = 2; // e.g., min, max, lt, gt
+  int64 value = 3;      // Optional value for comparison
+}

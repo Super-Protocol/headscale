@@ -1,36 +1,23 @@
 package dnetwork
 
 import (
+	"crypto/md5"
+	"encoding/binary"
+	"encoding/json"
 	"fmt"
-	"sync"
 	"time"
 )
 
 type DNode struct {
-	id              int64
-	systemId        string
 	Host            string    `json:"host"`
 	Port            uint16    `json:"port"`
-	LastAvailableAt time.Time `json:"last_available_at"`
-	banUntil        time.Time
+	LastAvailableAt time.Time `json:"last_available_at,omitempty"`
+	banUntil        time.Time `json:"-"`
 	banCount        uint64
 }
 
-var (
-	nextId   int64 = 0
-	nextIdMu sync.Mutex
-)
-
 func NewDNode(host string, port uint16, lastAvailableAt time.Time) *DNode {
-	nextIdMu.Lock()
-	nextId++
-	id := nextId
-	nextIdMu.Unlock()
-
-	systemId := MakeNodeSystemId(host, port)
 	return &DNode{
-		id:              id,
-		systemId:        systemId,
 		Host:            host,
 		Port:            port,
 		LastAvailableAt: lastAvailableAt,
@@ -39,8 +26,29 @@ func NewDNode(host string, port uint16, lastAvailableAt time.Time) *DNode {
 	}
 }
 
+func (n DNode) SystemID() string {
+	return fmt.Sprintf("%s:%d", n.Host, n.Port)
+}
+
+func (n DNode) IsLike(node *DNode) bool {
+	return n.Host == node.Host && n.Port == node.Port
+}
+
 func (n DNode) ID() int64 {
-	return n.id
+	hash := md5.Sum([]byte(n.SystemID()))
+	return int64(binary.BigEndian.Uint64(hash[:8]))
+}
+
+// MarshalJSON implements custom JSON marshaling for DNode
+func (n DNode) MarshalJSON() ([]byte, error) {
+	type Alias DNode
+	return json.Marshal(&struct {
+		Alias
+		LastAvailableAt string `json:"last_available_at"`
+	}{
+		Alias:           Alias(n),
+		LastAvailableAt: n.LastAvailableAt.Format(time.RFC3339),
+	})
 }
 
 func MakeNodeSystemId(host string, port uint16) string {

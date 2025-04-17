@@ -1,22 +1,22 @@
 package dnetwork
 
 import (
+	"crypto/md5"
+	"encoding/binary"
 	"gonum.org/v1/gonum/graph/simple"
 	"sync"
 )
 
 type DGraph struct {
-	g             *simple.UndirectedGraph
-	gMutex        sync.RWMutex
-	systemIdIndex map[string]int64
+	g      *simple.UndirectedGraph
+	gMutex sync.RWMutex
 }
 
 func NewDGraph() *DGraph {
 	graph := simple.NewUndirectedGraph()
 
 	return &DGraph{
-		g:             graph,
-		systemIdIndex: make(map[string]int64),
+		g: graph,
 	}
 }
 
@@ -38,14 +38,12 @@ func (n *DGraph) AddNode(node DNode) {
 	n.gMutex.Lock()
 	defer n.gMutex.Unlock()
 	n.g.AddNode(node)
-	n.systemIdIndex[node.systemId] = node.id
 }
 
 func (n *DGraph) RemoveNode(node DNode) {
 	n.gMutex.Lock()
 	defer n.gMutex.Unlock()
-	n.g.RemoveNode(node.id)
-	delete(n.systemIdIndex, node.systemId)
+	n.g.RemoveNode(node.ID())
 }
 
 func (n *DGraph) GetNodeByHostPort(host string, port uint16) (DNode, bool) {
@@ -57,10 +55,8 @@ func (n *DGraph) GetNodeById(systemId string) (DNode, bool) {
 	n.gMutex.RLock()
 	defer n.gMutex.RUnlock()
 
-	graphId, ok := n.systemIdIndex[systemId]
-	if !ok {
-		return DNode{}, false
-	}
+	hash := md5.Sum([]byte(systemId))
+	graphId := int64(binary.BigEndian.Uint64(hash[:8]))
 
 	node := n.g.Node(graphId)
 	dnode, ok := node.(DNode)
@@ -73,7 +69,7 @@ func (n *DGraph) GetNodeById(systemId string) (DNode, bool) {
 func (n *DGraph) SetMeasurement(from DNode, to DNode, name string, val Measurement) {
 	n.gMutex.Lock()
 	defer n.gMutex.Unlock()
-	edge := n.g.Edge(from.id, to.id)
+	edge := n.g.Edge(from.ID(), to.ID())
 	if edge == nil {
 		dEdge := NewDEdge(from, to)
 		n.g.SetEdge(dEdge)
@@ -87,6 +83,25 @@ func (n *DGraph) SetMeasurement(from DNode, to DNode, name string, val Measureme
 	}
 }
 
+func (n *DGraph) GetMeasurement(from DNode, to DNode, name string) (Measurement, bool) {
+	n.gMutex.RLock()
+	defer n.gMutex.RUnlock()
+	edge := n.g.Edge(from.ID(), to.ID())
+	if edge == nil {
+		return Measurement{}, false
+	} else {
+		dEdge, ok := edge.(*DEdge)
+		if !ok {
+			panic("unexpected edge type")
+		}
+		m, ok := dEdge.GetMeasurement(name)
+		if !ok {
+			return Measurement{}, false
+		}
+		return m, true
+	}
+}
+
 func (n *DGraph) GetMeasurements() map[string]map[string]map[string]Measurement {
 	n.gMutex.RLock()
 	defer n.gMutex.RUnlock()
@@ -97,8 +112,9 @@ func (n *DGraph) GetMeasurements() map[string]map[string]map[string]Measurement 
 	for edges.Next() {
 		edge := edges.Edge()
 		if dEdge, ok := edge.(*DEdge); ok {
-			fromId := dEdge.from.systemId
-			toId := dEdge.to.systemId
+			fromId := dEdge.from.SystemID()
+			toId := dEdge.to.SystemID()
+
 			measurements := dEdge.measurements
 
 			if _, ok := result[fromId]; !ok {
