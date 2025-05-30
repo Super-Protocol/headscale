@@ -23,6 +23,9 @@ const (
 	DNetworkService_SpreadGossip_FullMethodName          = "/dnetwork.v1.DNetworkService/SpreadGossip"
 	DNetworkService_MeasureLatency_FullMethodName        = "/dnetwork.v1.DNetworkService/MeasureLatency"
 	DNetworkService_ProposeGroupFormation_FullMethodName = "/dnetwork.v1.DNetworkService/ProposeGroupFormation"
+	DNetworkService_VoteOnGroupProposal_FullMethodName   = "/dnetwork.v1.DNetworkService/VoteOnGroupProposal"
+	DNetworkService_RequestConsensusVote_FullMethodName  = "/dnetwork.v1.DNetworkService/RequestConsensusVote"
+	DNetworkService_JoinConsensusCluster_FullMethodName  = "/dnetwork.v1.DNetworkService/JoinConsensusCluster"
 )
 
 // DNetworkServiceClient is the client API for DNetworkService service.
@@ -35,6 +38,9 @@ type DNetworkServiceClient interface {
 	MeasureLatency(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*MeasureLatencyResponse, error)
 	// Request for proposing group formation
 	ProposeGroupFormation(ctx context.Context, in *GroupProposalRequest, opts ...grpc.CallOption) (*GroupProposalResponse, error)
+	VoteOnGroupProposal(ctx context.Context, in *GroupVoteRequest, opts ...grpc.CallOption) (*GroupVoteResponse, error)
+	RequestConsensusVote(ctx context.Context, in *ConsensusVoteRequest, opts ...grpc.CallOption) (*ConsensusVoteResponse, error)
+	JoinConsensusCluster(ctx context.Context, in *JoinClusterRequest, opts ...grpc.CallOption) (*JoinClusterResponse, error)
 }
 
 type dNetworkServiceClient struct {
@@ -75,6 +81,36 @@ func (c *dNetworkServiceClient) ProposeGroupFormation(ctx context.Context, in *G
 	return out, nil
 }
 
+func (c *dNetworkServiceClient) VoteOnGroupProposal(ctx context.Context, in *GroupVoteRequest, opts ...grpc.CallOption) (*GroupVoteResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GroupVoteResponse)
+	err := c.cc.Invoke(ctx, DNetworkService_VoteOnGroupProposal_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *dNetworkServiceClient) RequestConsensusVote(ctx context.Context, in *ConsensusVoteRequest, opts ...grpc.CallOption) (*ConsensusVoteResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ConsensusVoteResponse)
+	err := c.cc.Invoke(ctx, DNetworkService_RequestConsensusVote_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *dNetworkServiceClient) JoinConsensusCluster(ctx context.Context, in *JoinClusterRequest, opts ...grpc.CallOption) (*JoinClusterResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(JoinClusterResponse)
+	err := c.cc.Invoke(ctx, DNetworkService_JoinConsensusCluster_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // DNetworkServiceServer is the server API for DNetworkService service.
 // All implementations must embed UnimplementedDNetworkServiceServer
 // for forward compatibility.
@@ -85,6 +121,9 @@ type DNetworkServiceServer interface {
 	MeasureLatency(context.Context, *emptypb.Empty) (*MeasureLatencyResponse, error)
 	// Request for proposing group formation
 	ProposeGroupFormation(context.Context, *GroupProposalRequest) (*GroupProposalResponse, error)
+	VoteOnGroupProposal(context.Context, *GroupVoteRequest) (*GroupVoteResponse, error)
+	RequestConsensusVote(context.Context, *ConsensusVoteRequest) (*ConsensusVoteResponse, error)
+	JoinConsensusCluster(context.Context, *JoinClusterRequest) (*JoinClusterResponse, error)
 	mustEmbedUnimplementedDNetworkServiceServer()
 }
 
@@ -103,6 +142,15 @@ func (UnimplementedDNetworkServiceServer) MeasureLatency(context.Context, *empty
 }
 func (UnimplementedDNetworkServiceServer) ProposeGroupFormation(context.Context, *GroupProposalRequest) (*GroupProposalResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ProposeGroupFormation not implemented")
+}
+func (UnimplementedDNetworkServiceServer) VoteOnGroupProposal(context.Context, *GroupVoteRequest) (*GroupVoteResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method VoteOnGroupProposal not implemented")
+}
+func (UnimplementedDNetworkServiceServer) RequestConsensusVote(context.Context, *ConsensusVoteRequest) (*ConsensusVoteResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method RequestConsensusVote not implemented")
+}
+func (UnimplementedDNetworkServiceServer) JoinConsensusCluster(context.Context, *JoinClusterRequest) (*JoinClusterResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method JoinConsensusCluster not implemented")
 }
 func (UnimplementedDNetworkServiceServer) mustEmbedUnimplementedDNetworkServiceServer() {}
 func (UnimplementedDNetworkServiceServer) testEmbeddedByValue()                         {}
@@ -179,6 +227,60 @@ func _DNetworkService_ProposeGroupFormation_Handler(srv interface{}, ctx context
 	return interceptor(ctx, in, info, handler)
 }
 
+func _DNetworkService_VoteOnGroupProposal_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GroupVoteRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DNetworkServiceServer).VoteOnGroupProposal(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: DNetworkService_VoteOnGroupProposal_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DNetworkServiceServer).VoteOnGroupProposal(ctx, req.(*GroupVoteRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _DNetworkService_RequestConsensusVote_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ConsensusVoteRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DNetworkServiceServer).RequestConsensusVote(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: DNetworkService_RequestConsensusVote_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DNetworkServiceServer).RequestConsensusVote(ctx, req.(*ConsensusVoteRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _DNetworkService_JoinConsensusCluster_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(JoinClusterRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DNetworkServiceServer).JoinConsensusCluster(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: DNetworkService_JoinConsensusCluster_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DNetworkServiceServer).JoinConsensusCluster(ctx, req.(*JoinClusterRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // DNetworkService_ServiceDesc is the grpc.ServiceDesc for DNetworkService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -197,6 +299,18 @@ var DNetworkService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ProposeGroupFormation",
 			Handler:    _DNetworkService_ProposeGroupFormation_Handler,
+		},
+		{
+			MethodName: "VoteOnGroupProposal",
+			Handler:    _DNetworkService_VoteOnGroupProposal_Handler,
+		},
+		{
+			MethodName: "RequestConsensusVote",
+			Handler:    _DNetworkService_RequestConsensusVote_Handler,
+		},
+		{
+			MethodName: "JoinConsensusCluster",
+			Handler:    _DNetworkService_JoinConsensusCluster_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

@@ -42,7 +42,7 @@ func TestGossipInteractionWithRandomNetworks(t *testing.T) {
 		network := NewDNetwork()
 		idx := rand.Intn(len(hostPortPool))
 		host, port := hostPortPool[idx].host, hostPortPool[idx].port
-		node := NewDNode(host, port, time.Now())
+		node := NewDNode(host, port, port+100, time.Now())
 		network.g.AddNode(*node)
 
 		// Add random number of nodes to the network
@@ -60,7 +60,7 @@ func TestGossipInteractionWithRandomNetworks(t *testing.T) {
 					continue
 				}
 				usedNodes[key] = struct{}{}
-				node := NewDNode(host, port, time.Now())
+				node := NewDNode(host, port, port+100, time.Now())
 				network.g.AddNode(*node)
 				break
 			}

@@ -87,6 +87,11 @@ func (d *DNetworkGrouping) ResolveGroupJoinRequest(fromNode DNode, groupName str
 		return false
 	}
 
+	if len(localNodes) >= targetGroup.Size.Max {
+		log.Debug().Msgf("Group %s already has maximum count of nodes (%d)", groupName, len(localNodes))
+		return false
+	}
+
 	if d.IsGroupFulfilled(targetGroup) {
 		log.Debug().Msgf("Group already have enough nodes %s", groupName)
 		return false
@@ -202,19 +207,32 @@ func (d *DNetworkGrouping) GetGroupingCandidates(group GroupConfig) ([]DNode, er
 	for _, criteria := range group.Criteria {
 		switch criteria.Condition {
 		case "min":
-			// Sort nodes by the specified measurement in ascending order
 			sort.SliceStable(candidates, func(i, j int) bool {
-				m1, _ := n.g.GetMeasurement(mainNode, candidates[i], criteria.Name)
-				m2, _ := n.g.GetMeasurement(mainNode, candidates[i], criteria.Name)
+				m1, exists1 := n.g.GetMeasurement(mainNode, candidates[i], criteria.Name)
+				m2, exists2 := n.g.GetMeasurement(mainNode, candidates[j], criteria.Name)
+
+				if !exists1 {
+					return false
+				}
+				if !exists2 {
+					return true
+				}
 				return m1.Value < m2.Value
 			})
 		case "max":
-			// Sort nodes by the specified measurement in descending order
 			sort.SliceStable(candidates, func(i, j int) bool {
-				m1, _ := n.g.GetMeasurement(mainNode, candidates[i], criteria.Name)
-				m2, _ := n.g.GetMeasurement(mainNode, candidates[i], criteria.Name)
+				m1, exists1 := n.g.GetMeasurement(mainNode, candidates[i], criteria.Name)
+				m2, exists2 := n.g.GetMeasurement(mainNode, candidates[j], criteria.Name)
+
+				if !exists1 {
+					return false
+				}
+				if !exists2 {
+					return true
+				}
 				return m1.Value > m2.Value
 			})
+
 		default:
 			// Filter nodes based on other conditions (e.g., lt, gt, eq, etc.)
 			var filtered []DNode
@@ -229,6 +247,13 @@ func (d *DNetworkGrouping) GetGroupingCandidates(group GroupConfig) ([]DNode, er
 			}
 			candidates = filtered
 		}
+	}
+
+	currentGroupSize := len(groupNodes) + 1
+
+	maxToAdd := group.Size.Max - currentGroupSize
+	if maxToAdd <= 0 {
+		return nil, fmt.Errorf("group already has enough nodes: %d", group.Size.Max)
 	}
 
 	// Apply size constraints
@@ -294,6 +319,17 @@ func (d *DNetworkGrouping) addNodeToGroup(node DNode, groupName string, groupId 
 		Value:            groupId,
 		CreationTimeUnix: uint64(time.Now().Unix()),
 	})
+}
+func (d *DNetworkGrouping) addNodeToGroupById(id string, groupName string, groupId int64) {
+	node, ok := d.n.g.GetNodeById(id)
+	if ok {
+		d.n.g.SetMeasurement(d.mainNode, node, getMeasurementNameForGroup(groupName), Measurement{
+			Value:            groupId,
+			CreationTimeUnix: uint64(time.Now().Unix()),
+		})
+	} else {
+		panic("addNodeToGroupById for unknown node: " + id)
+	}
 }
 
 func (d *DNetworkGrouping) removeNodeFromGroup(node DNode, groupName string) {

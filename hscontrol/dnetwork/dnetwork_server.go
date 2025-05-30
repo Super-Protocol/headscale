@@ -4,12 +4,13 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"fmt"
 	"github.com/rs/zerolog/log"
-	"golang.org/x/sync/semaphore"
 	"io/ioutil"
 	"math/rand"
 	"net"
+	"os"
 	"slices"
 	"sync"
 	"time"
@@ -28,6 +29,7 @@ const (
 // DNetworkServerConfig defines the server configuration
 type DNetworkServerConfig struct {
 	Port                   uint16        // e.g., 8443
+	RaftPort               uint16        // e.g., 8444
 	CertFile               string        // server certificate file
 	KeyFile                string        // server key file
 	CACertPath             string        // CA certificate file (for mutual TLS authentication)
@@ -48,20 +50,62 @@ type DNetworkServer struct {
 	config              DNetworkServerConfig
 	mainNode            DNode
 	groupFormationMutex sync.Mutex
+	consensus           *ConsensusManager // Менеджер консенсуса Raft
 }
 
 // NewDNetworkServer creates a new instance of DNetworkServer
 func NewDNetworkServer(config DNetworkServerConfig) *DNetworkServer {
 	n := NewDNetwork()
-	mainNode := NewDNode(config.AdvertiseHost, config.Port, time.Now())
+	mainNode := NewDNode(config.AdvertiseHost, config.Port, config.RaftPort, time.Now())
 	n.g.AddNode(*mainNode)
 	for _, node := range config.BootstrapNodes {
 		n.g.AddNode(node)
 	}
 	g := NewGossipInteraction(config.AdvertiseHost, config.Port, n)
 	grouping := NewDNetworkGrouping(n, *mainNode, config.GroupingGoals)
+
 	log.Info().Msg("Creating new DNetworkServer with push-based gossip mechanism")
-	return &DNetworkServer{n: n, gossip: g, config: config, grouping: grouping, mainNode: *mainNode}
+	server := &DNetworkServer{
+		n:        n,
+		gossip:   g,
+		config:   config,
+		grouping: grouping,
+		mainNode: *mainNode,
+	}
+
+	dataDir, err := os.MkdirTemp("", "raft-data")
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to create temporary directory for Raft data")
+		panic("Failed to create temporary directory for Raft data")
+	}
+
+	consensus, err := NewConsensusManager(*mainNode, grouping, dataDir, config.Port, config.RaftPort, config.CertFile, config.KeyFile, config.CACertPath)
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to initialize Raft consensus manager")
+		panic("Failed to initialize Raft consensus manager")
+	}
+
+	server.consensus = consensus
+	log.Info().Msg("Raft consensus manager initialized successfully")
+
+	log.Info().Msg("Ожидание становления лидером перед созданием групп...")
+	if err := server.consensus.WaitForLeadership(30 * time.Second); err != nil { // Таймаут по необходимости
+		log.Error().Err(err).Msg("Не удалось стать лидером для создания первоначальных групп")
+		panic("Timeout waiting for single raft node leadership")
+	} else {
+		log.Info().Msg("Узел стал лидером, приступаем к созданию групп.")
+	}
+
+	for _, groupConfig := range config.GroupingGoals {
+		err := consensus.CreateGroup(groupConfig)
+		if err != nil {
+			log.Error().Err(err).Str("group", groupConfig.Name).Msg("Failed to create group in consensus")
+		} else {
+			log.Info().Str("group", groupConfig.Name).Msg("Group created in consensus")
+		}
+	}
+
+	return server
 }
 
 // startGRPCServer initializes and starts a gRPC server with mutual TLS authentication
@@ -123,7 +167,149 @@ func (ns *DNetworkServer) Start() error {
 
 	go ns.startGrouping()
 
+	// Если это не первичная нода и есть bootstrap nodes, пытаемся присоединиться к кластеру
+	if len(ns.config.BootstrapNodes) > 0 {
+		go ns.joinConsensusClusterFromBootstrap()
+	}
+
 	return nil
+}
+
+// VoteOnGroupProposal обрабатывает запрос на голосование по группе
+func (ns *DNetworkServer) VoteOnGroupProposal(ctx context.Context, req *pb.GroupVoteRequest) (*pb.GroupVoteResponse, error) {
+	if ns.consensus == nil {
+		return &pb.GroupVoteResponse{
+			Approved: false,
+			Message:  "Консенсус не инициализирован",
+		}, nil
+	}
+
+	candidateNode := DNode{
+		Host: req.CandidateNode.Host,
+		Port: uint16(req.CandidateNode.Port),
+	}
+
+	proposingNode := DNode{
+		Host: req.ProposingNode.Host,
+		Port: uint16(req.ProposingNode.Port),
+	}
+
+	voteRequest := &GroupVoteRequest{
+		GroupName:     req.GroupName,
+		GroupID:       req.GroupId,
+		CandidateNode: candidateNode,
+		NodesInGroup:  req.NodesInGroup,
+		ProposingNode: proposingNode,
+	}
+
+	response, err := ns.consensus.HandleVoteRequest(voteRequest)
+	if err != nil {
+		return &pb.GroupVoteResponse{
+			Approved: false,
+			Message:  err.Error(),
+		}, nil
+	}
+
+	return &pb.GroupVoteResponse{
+		Approved: response.Approved,
+		Message:  response.Message,
+	}, nil
+}
+
+// RequestConsensusVote обрабатывает запрос на голосование через консенсус
+func (ns *DNetworkServer) RequestConsensusVote(ctx context.Context, req *pb.ConsensusVoteRequest) (*pb.ConsensusVoteResponse, error) {
+	if ns.consensus == nil {
+		return &pb.ConsensusVoteResponse{
+			Accepted: false,
+			Message:  "Консенсус не инициализирован",
+		}, nil
+	}
+
+	vote := struct {
+		GroupName string `json:"group_name"`
+		NodeID    string `json:"node_id"`
+		Approved  bool   `json:"approved"`
+	}{
+		GroupName: req.GroupName,
+		NodeID:    req.NodeId,
+		Approved:  req.Approved,
+	}
+
+	cmd := ConsensusCommand{
+		Op:    "vote",
+		Key:   req.VoteId,
+		Value: vote,
+	}
+
+	data, err := json.Marshal(cmd)
+	if err != nil {
+		return &pb.ConsensusVoteResponse{
+			Accepted: false,
+			Message:  fmt.Sprintf("Ошибка при сериализации голоса: %s", err),
+		}, nil
+	}
+
+	future := ns.consensus.raft.Apply(data, 10*time.Second)
+	if err := future.Error(); err != nil {
+		return &pb.ConsensusVoteResponse{
+			Accepted: false,
+			Message:  fmt.Sprintf("Ошибка при применении голоса: %s", err),
+		}, nil
+	}
+
+	return &pb.ConsensusVoteResponse{
+		Accepted: true,
+		Message:  "",
+	}, nil
+}
+
+// JoinConsensusCluster обрабатывает запрос на присоединение к Raft кластеру
+func (ns *DNetworkServer) JoinConsensusCluster(ctx context.Context, req *pb.JoinClusterRequest) (*pb.JoinClusterResponse, error) {
+	log.Info().Str("node_id", req.NodeId).Str("address", req.Address).Msg("Получен запрос на присоединение к кластеру консенсуса")
+
+	if ns.consensus == nil {
+		log.Warn().Str("node_id", req.NodeId).Msg("Отказ в присоединении: консенсус не инициализирован")
+		return &pb.JoinClusterResponse{
+			Accepted: false,
+			Message:  "Консенсус не инициализирован",
+		}, nil
+	}
+
+	// Проверяем, что мы лидер
+	if !ns.consensus.IsLeader() {
+		leader := ns.consensus.GetLeader()
+		log.Warn().Str("node_id", req.NodeId).Str("leader", leader).Msg("Отказ в присоединении: этот узел не является лидером")
+		return &pb.JoinClusterResponse{
+			Accepted: false,
+			Message:  fmt.Sprintf("Не лидер, текущий лидер: %s", leader),
+		}, nil
+	}
+
+	// Проверяем, не является ли нода уже частью кластера
+	if ns.consensus.IsNodeInCluster(req.NodeId) {
+		log.Info().Str("node_id", req.NodeId).Msg("Нода уже является частью кластера")
+		return &pb.JoinClusterResponse{
+			Accepted: true,
+			Message:  "Нода уже является частью кластера",
+		}, nil
+	}
+
+	// Добавляем ноду в кластер
+	log.Info().Str("node_id", req.NodeId).Str("address", req.Address).Msg("Добавление ноды в кластер консенсуса")
+	err := ns.consensus.AddNodeToCluster(req.NodeId, req.Address)
+	if err != nil {
+		log.Error().Err(err).Str("node_id", req.NodeId).Msg("Ошибка при добавлении ноды в кластер")
+		return &pb.JoinClusterResponse{
+			Accepted: false,
+			Message:  fmt.Sprintf("Ошибка при добавлении ноды в кластер: %s", err),
+		}, nil
+	}
+
+	log.Info().Str("node_id", req.NodeId).Msg("Нода успешно добавлена в кластер консенсуса")
+	return &pb.JoinClusterResponse{
+		Accepted: true,
+		Message:  "",
+	}, nil
 }
 
 // MeasureLatency implements the gRPC MeasureLatency method.
@@ -168,7 +354,6 @@ func (ns *DNetworkServer) SpreadGossip(ctx context.Context, req *pb.SpreadGossip
 
 // ProposeGroupFormation handles incoming group formation proposals
 func (ns *DNetworkServer) ProposeGroupFormation(ctx context.Context, req *pb.GroupProposalRequest) (*pb.GroupProposalResponse, error) {
-
 	log.Debug().Msgf("ProposeGroupFormation called")
 	proposingNode := DNode{
 		Host: req.ProposingNode.Host,
@@ -176,30 +361,32 @@ func (ns *DNetworkServer) ProposeGroupFormation(ctx context.Context, req *pb.Gro
 	}
 	groupConfig := convertProtoToGroupConfig(req.GroupConfig)
 
-	println(fmt.Sprintf("Proposing node: %v. Local node %v", proposingNode, ns.mainNode))
+	log.Debug().Msgf("Proposing node: %v. Local node %v", proposingNode, ns.mainNode)
 
-	sem := semaphore.NewWeighted(1)
+	// Используем Raft консенсус для принятия решения
+	voteRequest := &GroupVoteRequest{
+		GroupName:     groupConfig.Name,
+		CandidateNode: proposingNode,
+		NodesInGroup:  req.NodesConnected,
+		ProposingNode: proposingNode,
+	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	err := sem.Acquire(ctx, 1)
+	// Обрабатываем запрос голосования
+	response, err := ns.consensus.HandleVoteRequest(voteRequest)
 	if err != nil {
-		fmt.Println("Can't acquire mutex")
+		log.Error().Err(err).Msg("Error handling vote request")
 		return &pb.GroupProposalResponse{Status: 0}, nil
 	}
 
-	defer sem.Release(1)
-
-	println("Got mutex")
-
-	if ns.grouping.ResolveGroupJoinRequest(proposingNode, groupConfig.Name, 1, req.NodesConnected) {
-		log.Info().Msgf("Node %s accepted group proposal for group %s", proposingNode.SystemID(), groupConfig.Name)
-		ns.grouping.addNodeToGroup(proposingNode, groupConfig.Name, 1)
+	if response.Approved {
+		log.Info().Msgf("Node %s accepted group proposal for group %s via consensus", proposingNode.SystemID(), groupConfig.Name)
+		// Добавляем ноду в локальное представление группы
+		//ns.grouping.addNodeToGroup(proposingNode, groupConfig.Name, 1)
 		return &pb.GroupProposalResponse{Status: 1}, nil
 	}
 
-	log.Info().Msgf("Node %s rejected group proposal for group %s", proposingNode.SystemID(), groupConfig.Name)
+	log.Info().Msgf("Node %s rejected group proposal for group %s via consensus: %s",
+		proposingNode.SystemID(), groupConfig.Name, response.Message)
 	return &pb.GroupProposalResponse{Status: 0}, nil
 }
 
@@ -229,39 +416,57 @@ func (ns *DNetworkServer) startGrouping() {
 }
 
 func (ns *DNetworkServer) processGroups() {
-	println("Processing groups")
-	sem := semaphore.NewWeighted(1)
+	log.Debug().Msg("Processing groups")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	err := sem.Acquire(ctx, 1)
-	if err != nil {
+	if !ns.consensus.IsClusterFulfilled() {
+		log.Debug().Msg("Cluster is not fulfilled yet")
 		return
 	}
 
-	defer sem.Release(1)
-
-	println("Got mutex Processing groups")
+	log.Debug().Msg("Lock acquired for group processing")
 	for _, groupGoal := range ns.config.GroupingGoals {
+		// Проверяем, выполнена ли уже группа
 		if ns.grouping.IsGroupFulfilled(groupGoal) {
+			log.Debug().Msgf("Group %s is already fulfilled", groupGoal.Name)
 			continue
 		}
+
+		// Получаем кандидатов для группы
 		candidates, err := ns.grouping.GetGroupingCandidates(groupGoal)
 		if err != nil {
-			log.Error().Msgf("Error getting Grouping candidates %s", err.Error())
+			log.Error().Err(err).Str("group", groupGoal.Name).Msg("Error retrieving candidates for grouping")
 			continue
 		}
-		log.Debug().Msgf("Grouping candidates of %v for group %s: %v", ns.mainNode, groupGoal.Name, candidates)
-		selectedCandidate := candidates[rand.Intn(len(candidates))]
-		response, err := ns.proposeGroupFormation(selectedCandidate, groupGoal)
-		if err != nil {
-			log.Error().Msgf("Error sending grouping request %s", err.Error())
-			return
+
+		if len(candidates) == 0 {
+			log.Debug().Str("group", groupGoal.Name).Msg("No suitable candidates for group")
+			continue
 		}
-		log.Debug().Msgf("proposeGroupFormation response %v", response)
-		if response.Status == 1 {
-			ns.grouping.addNodeToGroup(selectedCandidate, groupGoal.Name, 1)
+
+		log.Debug().Str("group", groupGoal.Name).Int("candidates", len(candidates)).Msg("Found candidates for group")
+
+		// Выбираем кандидата и пытаемся сформировать группу
+		selectedCandidate := candidates[rand.Intn(len(candidates))]
+
+		voteResponse, err := ns.consensus.ProposeVote(groupGoal.Name, selectedCandidate)
+		if err != nil {
+			log.Error().Err(err).Str("group", groupGoal.Name).
+				Str("candidate", selectedCandidate.SystemID()).
+				Msg("Error proposing vote via consensus")
+			continue
+		}
+
+		if voteResponse.Approved {
+			log.Info().Str("node", selectedCandidate.SystemID()).
+				Str("group", groupGoal.Name).
+				Msg("Node has joined group via consensus")
+			// Добавляем ноду в локальное представление группы
+			//ns.grouping.addNodeToGroup(selectedCandidate, groupGoal.Name, 1)
+		} else {
+			log.Debug().Str("node", selectedCandidate.SystemID()).
+				Str("group", groupGoal.Name).
+				Str("reason", voteResponse.Message).
+				Msg("Vote to add node to group was rejected")
 		}
 	}
 }
@@ -533,6 +738,127 @@ func loadCACertPool(caCertPath string) (*x509.CertPool, error) {
 		return nil, fmt.Errorf("failed to append CA certificate")
 	}
 	return caCertPool, nil
+}
+
+// joinConsensusClusterFromBootstrap пытается присоединиться к существующему кластеру консенсуса
+// через bootstrap ноды. Метод перебирает bootstrap ноды и пытается подключиться к первой доступной.
+func (ns *DNetworkServer) joinConsensusClusterFromBootstrap() {
+	// Ожидаем небольшую задержку перед попыткой присоединения, чтобы gRPC сервер успел запуститься
+	time.Sleep(2 * time.Second)
+
+	if ns.consensus.IsLeader() {
+		log.Info().Msg("Этот узел уже является лидером кластера, пропускаем присоединение")
+		return
+	}
+
+	log.Info().Msg("Попытка присоединения к кластеру консенсуса через bootstrap ноды")
+
+	// Идентификатор нашего узла для кластера
+	nodeID := ns.mainNode.SystemID()
+
+	// Адрес для Raft
+	raftAddr := fmt.Sprintf("%s:%d", ns.config.AdvertiseHost, ns.config.RaftPort)
+
+	// Перебираем все bootstrap ноды, пытаемся присоединиться к первой доступной
+	maxRetries := 10
+	retryInterval := 5 * time.Second
+
+	for retry := 0; retry < maxRetries; retry++ {
+		if retry > 0 {
+			log.Info().Int("retry", retry).Dur("interval", retryInterval).
+				Msg("Повторная попытка присоединения к кластеру")
+			time.Sleep(retryInterval)
+		}
+
+		for _, bootstrapNode := range ns.config.BootstrapNodes {
+			log.Info().Str("bootstrap_node", bootstrapNode.Host).
+				Uint16("port", bootstrapNode.Port).
+				Msg("Попытка присоединения к кластеру через ноду")
+
+			client, conn, err := ns.createGRPCClient(bootstrapNode)
+			if err != nil {
+				log.Error().Err(err).Str("node", bootstrapNode.Host).
+					Msg("Не удалось создать gRPC клиент для bootstrap ноды")
+				continue
+			}
+
+			// Отправляем запрос на присоединение
+			joinReq := &pb.JoinClusterRequest{
+				NodeId:  nodeID,
+				Address: raftAddr,
+			}
+
+			resp, err := client.JoinConsensusCluster(context.Background(), joinReq)
+			conn.Close()
+
+			if err != nil {
+				log.Error().Err(err).Str("node", bootstrapNode.Host).
+					Msg("Ошибка при отправке запроса на присоединение к кластеру")
+				continue
+			}
+
+			if resp.Accepted {
+				log.Info().Str("node", bootstrapNode.Host).
+					Msg("Успешно присоединились к кластеру консенсуса")
+				return
+			} else {
+				log.Warn().Str("node", bootstrapNode.Host).
+					Str("message", resp.Message).
+					Msg("Запрос на присоединение к кластеру отклонен")
+
+				// Если сообщение указывает на другого лидера, пробуем подключиться к нему
+				if resp.Message != "" && resp.Message != "Консенсус не инициализирован" {
+					if resp.Message[:9] == "Не лидер" {
+						// Ищем адрес лидера в сообщении
+						log.Info().Str("message", resp.Message).
+							Msg("Получена информация о текущем лидере, переключаемся на него")
+
+						// Пробуем найти ноду лидера в нашем списке нод
+						leaderHost := resp.Message[len(resp.Message)-15:]
+						for _, node := range ns.n.GetAllNodes() {
+							if node.SystemID() == leaderHost {
+								log.Info().Str("leader", node.Host).
+									Uint16("port", node.Port).
+									Msg("Пробуем подключиться к лидеру")
+
+								// Создаем gRPC клиент для лидера
+								leaderClient, leaderConn, err := ns.createGRPCClient(node)
+								if err != nil {
+									log.Error().Err(err).Str("node", node.Host).
+										Msg("Не удалось создать gRPC клиент для лидера")
+									break
+								}
+
+								// Отправляем запрос на присоединение
+								leaderResp, err := leaderClient.JoinConsensusCluster(context.Background(), joinReq)
+								leaderConn.Close()
+
+								if err != nil {
+									log.Error().Err(err).Str("node", node.Host).
+										Msg("Ошибка при отправке запроса на присоединение к лидеру")
+									break
+								}
+
+								if leaderResp.Accepted {
+									log.Info().Str("node", node.Host).
+										Msg("Успешно присоединились к кластеру консенсуса через лидера")
+									return
+								} else {
+									log.Warn().Str("node", node.Host).
+										Str("message", leaderResp.Message).
+										Msg("Запрос на присоединение к кластеру через лидера отклонен")
+								}
+								break
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	log.Error().Int("max_retries", maxRetries).
+		Msg("Исчерпаны все попытки присоединения к кластеру консенсуса")
 }
 
 // convertGroupConfigToProto converts a Go GroupConfig struct to a protobuf GroupConfig

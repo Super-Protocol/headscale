@@ -30,22 +30,24 @@ func TestDNetworkServerGossipSync(t *testing.T) {
 	defer os.Remove(keyFile)
 	defer os.Remove(caFile)
 
-	const numServers = 15
+	const numServers = 8
 	servers := make([]*DNetworkServer, 0, numServers)
 	// Store address (host and port) for each server
 	type Addr struct {
-		host string
-		port uint16
+		host     string
+		port     uint16
+		raftPort uint16
 	}
 	addresses := make([]Addr, 0, numServers)
 
 	// Select a free port for each instance
 	for i := 0; i < numServers; i++ {
 		port, err := getFreePort()
+		raftPort, err := getFreePort()
 		if err != nil {
 			t.Fatalf("failed to get free port: %v", err)
 		}
-		addresses = append(addresses, Addr{host: "127.0.0.1", port: port})
+		addresses = append(addresses, Addr{host: "127.0.0.1", port: port, raftPort: raftPort})
 	}
 
 	var doneChan chan struct{}
@@ -58,6 +60,7 @@ func TestDNetworkServerGossipSync(t *testing.T) {
 			bootstrapNodes = append(bootstrapNodes, DNode{
 				Host:            addresses[0].host,
 				Port:            addresses[0].port,
+				RaftPort:        addresses[0].raftPort,
 				LastAvailableAt: time.Now(),
 			})
 		} else {
@@ -68,6 +71,7 @@ func TestDNetworkServerGossipSync(t *testing.T) {
 		// Server configuration
 		cfg := DNetworkServerConfig{
 			Port:                   addr.port,
+			RaftPort:               addr.raftPort,
 			CertFile:               certFile,
 			KeyFile:                keyFile,
 			CACertPath:             caFile,

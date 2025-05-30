@@ -10,16 +10,18 @@ import (
 
 type DNode struct {
 	Host            string    `json:"host"`
+	RaftPort        uint16    `json:"port"`
 	Port            uint16    `json:"port"`
 	LastAvailableAt time.Time `json:"last_available_at,omitempty"`
 	banUntil        time.Time `json:"-"`
 	banCount        uint64
 }
 
-func NewDNode(host string, port uint16, lastAvailableAt time.Time) *DNode {
+func NewDNode(host string, port uint16, raftPort uint16, lastAvailableAt time.Time) *DNode {
 	return &DNode{
 		Host:            host,
 		Port:            port,
+		RaftPort:        raftPort,
 		LastAvailableAt: lastAvailableAt,
 		banUntil:        time.Unix(0, 0),
 		banCount:        0,

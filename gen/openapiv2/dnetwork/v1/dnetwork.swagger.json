@@ -45,6 +45,17 @@
         }
       }
     },
+    "v1ConsensusVoteResponse": {
+      "type": "object",
+      "properties": {
+        "accepted": {
+          "type": "boolean"
+        },
+        "message": {
+          "type": "string"
+        }
+      }
+    },
     "v1DNode": {
       "type": "object",
       "properties": {
@@ -52,6 +63,10 @@
           "type": "string"
         },
         "port": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "raftPort": {
           "type": "integer",
           "format": "int64"
         },
@@ -123,6 +138,28 @@
         }
       },
       "title": "Group size constraints"
+    },
+    "v1GroupVoteResponse": {
+      "type": "object",
+      "properties": {
+        "approved": {
+          "type": "boolean"
+        },
+        "message": {
+          "type": "string"
+        }
+      }
+    },
+    "v1JoinClusterResponse": {
+      "type": "object",
+      "properties": {
+        "accepted": {
+          "type": "boolean"
+        },
+        "message": {
+          "type": "string"
+        }
+      }
     },
     "v1MeasureLatencyResponse": {
       "type": "object",

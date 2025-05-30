@@ -59,7 +59,7 @@ func (g *GossipInteraction) HandleInfoReceived(receivedNodes []DNode, receivedMe
 		existingNode, exists := g.n.g.GetNodeByHostPort(receivedNode.Host, receivedNode.Port)
 		if !exists {
 			//spew.Dump(receivedNode)
-			dNode := NewDNode(receivedNode.Host, receivedNode.Port, receivedNode.LastAvailableAt)
+			dNode := NewDNode(receivedNode.Host, receivedNode.Port, receivedNode.RaftPort, receivedNode.LastAvailableAt)
 			g.n.g.AddNode(*dNode)
 		} else {
 			if receivedNode.LastAvailableAt.After(existingNode.LastAvailableAt) {

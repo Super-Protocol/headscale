@@ -10,7 +10,8 @@ import "google/protobuf/empty.proto";
 message DNode {
   string host = 1;
   uint32 port = 2;
-  int64 last_available_at = 3;
+  uint32 raft_port = 3;
+  int64 last_available_at = 4;
 }
 
 // Message representing a measurement
@@ -47,6 +48,10 @@ service DNetworkService {
   rpc MeasureLatency(google.protobuf.Empty) returns (MeasureLatencyResponse);
   // Request for proposing group formation
   rpc ProposeGroupFormation(GroupProposalRequest) returns (GroupProposalResponse);
+
+  rpc VoteOnGroupProposal(GroupVoteRequest) returns (GroupVoteResponse);
+  rpc RequestConsensusVote(ConsensusVoteRequest) returns (ConsensusVoteResponse);
+  rpc JoinConsensusCluster(JoinClusterRequest) returns (JoinClusterResponse);
 }
 
 // Response for MeasureLatency
@@ -84,4 +89,40 @@ message GroupCriteria {
   string name = 1;
   string condition = 2; // e.g., min, max, lt, gt
   int64 value = 3;      // Optional value for comparison
+}
+
+
+message GroupVoteRequest {
+  string group_name = 1;
+  int64 group_id = 2;
+  DNode candidate_node = 3;
+  repeated string nodes_in_group = 4;
+  DNode proposing_node = 5;
+}
+
+message GroupVoteResponse {
+  bool approved = 1;
+  string message = 2;
+}
+
+message ConsensusVoteRequest {
+  string vote_id = 1;
+  string group_name = 2;
+  string node_id = 3;
+  bool approved = 4;
+}
+
+message ConsensusVoteResponse {
+  bool accepted = 1;
+  string message = 2;
+}
+
+message JoinClusterRequest {
+  string node_id = 1;
+  string address = 2;
+}
+
+message JoinClusterResponse {
+  bool accepted = 1;
+  string message = 2;
 }
