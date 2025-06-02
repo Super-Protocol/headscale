@@ -4,6 +4,7 @@ go 1.23.1
 
 require (
 	github.com/AlecAivazis/survey/v2 v2.3.7
+	github.com/bits-and-blooms/bloom/v3 v3.7.0
 	github.com/cenkalti/backoff/v4 v4.3.0
 	github.com/chasefleming/elem-go v0.30.0
 	github.com/coder/websocket v1.8.12

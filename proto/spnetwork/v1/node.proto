@@ -1,0 +1,12 @@
+syntax = "proto3";
+
+package network;
+
+option go_package = "github.com/juanfont/headscale/gen/go/spnetwork/v1";
+
+message Node {
+  string id = 1;
+  map<string, string> properties = 2;
+  uint64 version = 3;
+  bool deleted = 4;
+}
