@@ -6,9 +6,9 @@ import (
 	"github.com/juanfont/headscale/hscontrol/spnetwork/common/entities"
 	"github.com/juanfont/headscale/hscontrol/spnetwork/consensus"
 	"github.com/juanfont/headscale/hscontrol/spnetwork/grouping"
-	"github.com/juanfont/headscale/hscontrol/spnetwork/measuring"
+	"github.com/juanfont/headscale/hscontrol/spnetwork/measurer"
 	"github.com/juanfont/headscale/hscontrol/spnetwork/syncer"
-	gossip2 "github.com/juanfont/headscale/hscontrol/spnetwork/syncer/gossip"
+	g "github.com/juanfont/headscale/hscontrol/spnetwork/syncer/gossip"
 	"sync"
 	"time"
 )
@@ -17,9 +17,10 @@ type SPNetwork struct {
 	LocalNode    *entities.Node
 	Syncer       syncer.Syncer
 	Consensus    consensus.Consensus
-	Measurer     measuring.Measuring
+	Measurer     measurer.Measurer
 	Grouping     grouping.Grouping
 	nodeRegistry *common.TypedRegistry[*entities.Node]
+	registry     common.EntityRegistry
 	mu           sync.Mutex
 	running      bool
 }
@@ -46,7 +47,7 @@ func NewSPNetwork(localNode *entities.Node, bootstrapNodes []*entities.Node, pki
 	}
 	host, _ := localNode.GetHost()
 	port, _ := localNode.GetGossipPort()
-	transportConfig := gossip2.GrpcTransportConfig{
+	transportConfig := g.GrpcTransportConfig{
 		ListenHost: host,
 		ListenPort: int(port),
 		EnableTLS:  true,
@@ -54,15 +55,24 @@ func NewSPNetwork(localNode *entities.Node, bootstrapNodes []*entities.Node, pki
 		KeyFile:    pkiConfig.KeyFile,
 		CaFile:     pkiConfig.CaFile,
 	}
-	syncerTransport, err := gossip2.NewGrpcTransport(syncerRegistry, localNode, transportConfig)
+	syncerTransport, err := g.NewGrpcTransport(syncerRegistry, localNode, transportConfig)
 	if err != nil {
 		return nil, err
 	}
-	s := gossip2.NewGossip(syncerRegistry, localNode.ID, syncerTransport, time.Duration(1)*time.Second)
+	s := g.NewGossip(syncerRegistry, localNode.ID, syncerTransport, time.Duration(1)*time.Second)
+
+	udpPingPort, _ := localNode.GetUdpPingPort()
+	m, err := measurer.NewUDPPingMeasurerWithDefaults(syncerRegistry, localNode, host, int(udpPingPort))
+	if err != nil {
+		return nil, err
+	}
+
 	n := &SPNetwork{
 		LocalNode:    localNode,
 		Syncer:       s,
+		Measurer:     m,
 		nodeRegistry: nodeRegistry,
+		registry:     syncerRegistry,
 	}
 	return n, nil
 }
@@ -82,15 +92,16 @@ func (n *SPNetwork) Start() error {
 		return err
 	}
 
+	err = n.Measurer.Start()
+	if err != nil {
+		return err
+	}
+
 	//err = n.Consensus.Join()
 	//if err != nil {
 	//	return err
 	//}
 	//
-	//err = n.Measurer.Start()
-	//if err != nil {
-	//	return err
-	//}
 	//
 	//err = n.Grouping.Start()
 	//if err != nil {
@@ -113,17 +124,16 @@ func (n *SPNetwork) Stop() error {
 	//	return err
 	//}
 	//
-	//err = n.Measurer.Stop()
-	//if err != nil {
-	//	return err
-	//}
-	//
 	//err = n.Consensus.Leave()
 	//if err != nil {
 	//	return err
 	//}
+	err := n.Measurer.Stop()
+	if err != nil {
+		return err
+	}
 
-	err := n.Syncer.Stop()
+	err = n.Syncer.Stop()
 	if err != nil {
 		return err
 	}

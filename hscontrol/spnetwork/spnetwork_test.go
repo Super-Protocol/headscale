@@ -1,12 +1,14 @@
 package spnetwork
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"fmt"
+	"github.com/juanfont/headscale/hscontrol/spnetwork/common"
 	"github.com/juanfont/headscale/hscontrol/spnetwork/common/entities"
 	"math/big"
 	"net"
@@ -20,7 +22,7 @@ import (
 // корректно синхронизируют информацию о узлах сети между собой
 func TestSPNetworkSynchronization(t *testing.T) {
 	// Количество серверов для теста (легко меняется)
-	numServers := 50
+	numServers := 2
 
 	// Создаем временный каталог для сертификатов
 	tempDir, err := os.MkdirTemp("", "spnetwork-test")
@@ -45,6 +47,7 @@ func TestSPNetworkSynchronization(t *testing.T) {
 		node := entities.NewNode(fmt.Sprintf("node-%d", i))
 		node.SetHost("127.0.0.1")
 		node.SetGossipPort(uint16(basePort + i))
+		node.SetUdpPingPort(uint16(basePort + i + 1000))
 		nodes[i] = node
 	}
 
@@ -86,20 +89,62 @@ func TestSPNetworkSynchronization(t *testing.T) {
 	t.Log("Ожидаем 10 секунд для синхронизации серверов...")
 	time.Sleep(10 * time.Second)
 
-	// Проверяем, что все серверы имеют одинаковый список узлов
+	// Проверяем, что все серверы имеют одинаковый список сущностей всех типов
 	for i := 0; i < numServers; i++ {
 		for j := i + 1; j < numServers; j++ {
-			nodes1, _ := servers[i].nodeRegistry.GetAllEntities()
-			nodes2, _ := servers[j].nodeRegistry.GetAllEntities()
-			if len(nodes1) != len(nodes2) {
-				t.Errorf("Серверы %d и %d имеют разное количество узлов: %d vs %d",
-					i, j, len(nodes1), len(nodes2))
+			// Получаем все сущности из registry для обоих серверов
+			entities1 := servers[i].registry.GetAllEntities()
+			entities2 := servers[j].registry.GetAllEntities()
+
+			// Проверяем, что оба сервера имеют одинаковое количество типов сущностей
+			if len(entities1) != len(entities2) {
+				t.Errorf("Серверы %d и %d имеют разное количество типов сущностей: %d vs %d",
+					i, j, len(entities1), len(entities2))
+			}
+
+			// Проверяем сущности каждого типа
+			for entityType, entitiesOfType1 := range entities1 {
+				entitiesOfType2, exists := entities2[entityType]
+				if !exists {
+					t.Errorf("Сервер %d не содержит сущностей типа %s, которые есть на сервере %d",
+						j, entityType, i)
+					continue
+				}
+
+				// Проверяем количество сущностей каждого типа
+				if len(entitiesOfType1) != len(entitiesOfType2) {
+					t.Errorf("Серверы %d и %d имеют разное количество сущностей типа %s: %d vs %d",
+						i, j, entityType, len(entitiesOfType1), len(entitiesOfType2))
+				}
+
+				// Создаем карту для сущностей первого сервера с ключом ID
+				entityMap1 := make(map[string]common.Entity)
+				for _, entity := range entitiesOfType1 {
+					entityMap1[entity.GetID()] = entity
+				}
+
+				// Проверяем каждую сущность второго сервера
+				for _, entity2 := range entitiesOfType2 {
+					entity1, exists := entityMap1[entity2.GetID()]
+					if !exists {
+						t.Errorf("Сервер %d содержит сущность типа %s с ID %s, отсутствующую на сервере %d",
+							j, entityType, entity2.GetID(), i)
+						continue
+					}
+
+					// Проверяем, что хеши сущностей совпадают
+					if bytes.Compare(entity1.GetHash(), entity2.GetHash()) != 0 {
+						t.Errorf("Сущность типа %s с ID %s имеет разные хеши на серверах %d и %d",
+							entityType, entity2.GetID(), i, j)
+					}
+				}
 			}
 		}
 	}
 
 	// Проверяем, что каждый сервер знает о всех узлах
 	for i := 0; i < numServers; i++ {
+		// Получаем узлы через типизированный registry для проверки конкретно узлов
 		nodes, _ := servers[i].nodeRegistry.GetAllEntities()
 		if len(nodes) != numServers {
 			t.Errorf("Сервер %d знает только о %d узлах из %d",

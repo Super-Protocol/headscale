@@ -104,6 +104,7 @@ func (n *Node) SetHost(value string) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.Properties["host"] = value
+	n.Version++
 }
 
 func (n *Node) GetGossipPort() (uint16, bool) {
@@ -125,6 +126,29 @@ func (n *Node) SetGossipPort(value uint16) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.Properties["gossip_port"] = strconv.Itoa(int(value))
+	n.Version++
+}
+
+func (n *Node) GetUdpPingPort() (uint16, bool) {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	value, ok := n.Properties["udp_ping_port"]
+	if !ok {
+		return 0, false
+	}
+	intVal, err := strconv.ParseUint(value, 10, 16)
+	if err != nil {
+		return 0, false
+	}
+
+	return uint16(intVal), true
+}
+
+func (n *Node) SetUdpPingPort(value uint16) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.Properties["udp_ping_port"] = strconv.Itoa(int(value))
+	n.Version++
 }
 
 func NodeFromProto(p *p.Node) *Node {

@@ -1,5 +1,7 @@
 package common
 
 const (
-	NodeEntityType = "node"
+	NodeEntityType        = "node"
+	MeasurementEntityType = "measurement"
+	GroupEntityType       = "measurement"
 )

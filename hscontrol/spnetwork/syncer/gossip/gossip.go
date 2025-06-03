@@ -78,10 +78,6 @@ func (g *Gossip) runSyncIfNotRunning() error {
 			return
 		}
 
-		log.Debug().
-			Str("node_id", g.localNodeID).
-			Msgf("gossip all nodes: %v", nodes)
-
 		if len(nodes) == 0 {
 			g.mu.Lock()
 			g.syncRunning = false
@@ -96,10 +92,6 @@ func (g *Gossip) runSyncIfNotRunning() error {
 			}
 		}
 
-		log.Debug().
-			Str("node_id", g.localNodeID).
-			Msgf("gossip remoteNodes: %v", remoteNodes)
-
 		if len(remoteNodes) == 0 {
 			g.mu.Lock()
 			g.syncRunning = false
@@ -109,10 +101,6 @@ func (g *Gossip) runSyncIfNotRunning() error {
 
 		randomIndex := rand.Intn(len(remoteNodes))
 		selectedNode := remoteNodes[randomIndex]
-
-		log.Debug().
-			Str("node_id", g.localNodeID).
-			Msgf("gossip selectedNode: %v", selectedNode)
 
 		_ = g.Transport.Sync(selectedNode)
 

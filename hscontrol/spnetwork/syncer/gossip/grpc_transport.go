@@ -236,7 +236,6 @@ func (s *GossipServiceServer) GetData(ctx context.Context, req *pb.GetDataReques
 
 		// 4) Сравниваем: если !=, то возвращаем все сущности из этого bucket’a
 		if !bytes.Equal(clientHash, serverHash) {
-			log.Debug().Msgf("Returning data for %s#%d", entityType, bucketIdx)
 			baos := &pb.BytesArray{Items: make([][]byte, 0)}
 
 			if exists {
