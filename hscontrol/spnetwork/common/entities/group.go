@@ -3,6 +3,7 @@ package entities
 import (
 	"crypto/md5"
 	"encoding/binary"
+	"github.com/google/uuid"
 	p "github.com/juanfont/headscale/gen/go/spnetwork/v1"
 	"google.golang.org/protobuf/proto"
 	"sort"
@@ -12,18 +13,15 @@ import (
 type Group struct {
 	ID           string
 	Goal         string
-	MinSize      uint32
-	MaxSize      uint32
 	Participants []string
-	Ready        bool
 	Version      uint64
 	Deleted      bool
 	mu           sync.RWMutex
 }
 
-func NewGroup(id string) *Group {
+func NewGroup() *Group {
 	return &Group{
-		ID:           id,
+		ID:           uuid.New().String(),
 		Participants: make([]string, 0),
 		Version:      0,
 		Deleted:      false,
@@ -58,16 +56,6 @@ func (g *Group) GetHash() []byte {
 	h.Write([]byte(g.ID))
 	h.Write([]byte(g.Goal))
 
-	err := binary.Write(h, binary.LittleEndian, g.MinSize)
-	if err != nil {
-		return nil
-	}
-
-	err = binary.Write(h, binary.LittleEndian, g.MaxSize)
-	if err != nil {
-		return nil
-	}
-
 	// Сортируем участников для стабильного хеша
 	participants := make([]string, len(g.Participants))
 	copy(participants, g.Participants)
@@ -77,13 +65,7 @@ func (g *Group) GetHash() []byte {
 		h.Write([]byte(participant))
 	}
 
-	if g.Ready {
-		h.Write([]byte{1})
-	} else {
-		h.Write([]byte{0})
-	}
-
-	err = binary.Write(h, binary.LittleEndian, g.Version)
+	err := binary.Write(h, binary.LittleEndian, g.Version)
 	if err != nil {
 		return nil
 	}
@@ -105,10 +87,7 @@ func (g *Group) ToProto() *p.Group {
 	return &p.Group{
 		Id:           g.ID,
 		Goal:         g.Goal,
-		MinSize:      g.MinSize,
-		MaxSize:      g.MaxSize,
 		Participants: g.Participants,
-		Ready:        g.Ready,
 		Version:      g.Version,
 		Deleted:      g.Deleted,
 	}
@@ -131,36 +110,6 @@ func (g *Group) SetGoal(goal string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.Goal = goal
-	g.Version++
-}
-
-// GetMinSize возвращает минимальный размер группы
-func (g *Group) GetMinSize() uint32 {
-	g.mu.RLock()
-	defer g.mu.RUnlock()
-	return g.MinSize
-}
-
-// SetMinSize устанавливает минимальный размер группы и увеличивает версию
-func (g *Group) SetMinSize(size uint32) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.MinSize = size
-	g.Version++
-}
-
-// GetMaxSize возвращает максимальный размер группы
-func (g *Group) GetMaxSize() uint32 {
-	g.mu.RLock()
-	defer g.mu.RUnlock()
-	return g.MaxSize
-}
-
-// SetMaxSize устанавливает максимальный размер группы и увеличивает версию
-func (g *Group) SetMaxSize(size uint32) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.MaxSize = size
 	g.Version++
 }
 
@@ -203,21 +152,6 @@ func (g *Group) RemoveParticipant(participant string) {
 	}
 }
 
-// IsReady возвращает готовность группы
-func (g *Group) IsReady() bool {
-	g.mu.RLock()
-	defer g.mu.RUnlock()
-	return g.Ready
-}
-
-// SetReady устанавливает готовность группы и увеличивает версию
-func (g *Group) SetReady(ready bool) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.Ready = ready
-	g.Version++
-}
-
 // MarkDeleted помечает группу как удаленную и увеличивает версию
 func (g *Group) MarkDeleted() {
 	g.mu.Lock()
@@ -231,10 +165,7 @@ func GroupFromProto(p *p.Group) *Group {
 	return &Group{
 		ID:           p.Id,
 		Goal:         p.Goal,
-		MinSize:      p.MinSize,
-		MaxSize:      p.MaxSize,
 		Participants: p.Participants,
-		Ready:        p.Ready,
 		Version:      p.Version,
 		Deleted:      p.Deleted,
 	}

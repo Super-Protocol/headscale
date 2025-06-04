@@ -5,11 +5,11 @@ import (
 )
 
 type TypedRegistry[T Entity] struct {
-	registry   EntityRegistry
+	registry   Registry
 	entityType string
 }
 
-func NewTypedRegistry[T Entity](registry EntityRegistry, entityType string) *TypedRegistry[T] {
+func NewTypedRegistry[T Entity](registry Registry, entityType string) *TypedRegistry[T] {
 	return &TypedRegistry[T]{
 		registry:   registry,
 		entityType: entityType,

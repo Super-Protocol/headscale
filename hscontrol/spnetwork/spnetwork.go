@@ -20,7 +20,7 @@ type SPNetwork struct {
 	Measurer     measurer.Measurer
 	Grouping     grouping.Grouping
 	nodeRegistry *common.TypedRegistry[*entities.Node]
-	registry     common.EntityRegistry
+	registry     common.Registry
 	mu           sync.Mutex
 	running      bool
 }

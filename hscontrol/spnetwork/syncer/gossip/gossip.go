@@ -10,24 +10,22 @@ import (
 )
 
 type Gossip struct {
-	Registry     common.EntityRegistry
-	NodeRegistry *common.TypedRegistry[*entities.Node]
-	Transport    SyncerTransport
-	localNodeID  string
-	mu           sync.Mutex
-	syncInterval time.Duration
-	stopChan     chan struct{}
-	syncRunning  bool
+	entityRegistry *common.EntityRegistry
+	Transport      SyncerTransport
+	localNodeID    string
+	mu             sync.Mutex
+	syncInterval   time.Duration
+	stopChan       chan struct{}
+	syncRunning    bool
 }
 
-func NewGossip(registry common.EntityRegistry, localNodeID string, transport SyncerTransport, syncInterval time.Duration) *Gossip {
+func NewGossip(entityRegistry *common.EntityRegistry, localNodeID string, transport SyncerTransport, syncInterval time.Duration) *Gossip {
 	g := &Gossip{
-		Registry:     registry,
-		NodeRegistry: common.NewTypedRegistry[*entities.Node](registry, common.NodeEntityType),
-		Transport:    transport,
-		localNodeID:  localNodeID,
-		syncInterval: syncInterval,
-		stopChan:     make(chan struct{}),
+		entityRegistry: entityRegistry,
+		Transport:      transport,
+		localNodeID:    localNodeID,
+		syncInterval:   syncInterval,
+		stopChan:       make(chan struct{}),
 	}
 	return g
 }
@@ -72,9 +70,14 @@ func (g *Gossip) runSyncIfNotRunning() error {
 	g.mu.Unlock()
 
 	go func() {
-		nodes, err := g.NodeRegistry.GetAllEntities()
+		nodes, err := g.entityRegistry.Node.GetAllEntities()
 		if err != nil {
-			log.Err(err)
+			log.Err(err).
+				Str("error", "error getting nodes").
+				Msg("failed to get nodes")
+			g.mu.Lock()
+			g.syncRunning = false
+			g.mu.Unlock()
 			return
 		}
 

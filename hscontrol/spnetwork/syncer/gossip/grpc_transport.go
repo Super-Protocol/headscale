@@ -26,7 +26,7 @@ import (
 type GrpcTransportConfig TransportConfig
 
 type GrpcTransport struct {
-	entityRegistry common.EntityRegistry
+	entityRegistry *common.EntityRegistry
 	localNode      *entities.Node
 	running        bool
 	mu             sync.Mutex
@@ -82,7 +82,7 @@ func computeBucketHash(entities []common.Entity) []byte {
 	return h.Sum(nil) // 16 байт MD5
 }
 
-func NewGrpcTransport(entityRegistry common.EntityRegistry, localNode *entities.Node, config GrpcTransportConfig) (*GrpcTransport, error) {
+func NewGrpcTransport(entityRegistry *common.EntityRegistry, localNode *entities.Node, config GrpcTransportConfig) (*GrpcTransport, error) {
 	log.Debug().
 		Str("node_id", localNode.GetID()).
 		Str("listen_host", config.ListenHost).
@@ -158,19 +158,80 @@ func (s *GossipServiceServer) GetData(ctx context.Context, req *pb.GetDataReques
 		Str("req_node_id", req.NodeId).
 		Msg("Обработка запроса GetData")
 
-	entitiesByType := s.transport.entityRegistry.GetAllEntities()
+	// Получаем все сущности через EntityRegistry
+	entitiesByType := make(map[string][]common.Entity)
 
-	nodeEntities := make([]entities.Node, 0, len(entitiesByType["node"]))
-	for _, entity := range entitiesByType["node"] {
+	// Добавляем ноды
+	nodes, err := s.transport.entityRegistry.Node.GetAllEntities()
+	if err != nil {
+		log.Error().
+			Err(err).
+			Str("node_id", s.transport.localNode.GetID()).
+			Msg("error getting nodes")
+	} else {
+		nodeEntities := make([]common.Entity, 0, len(nodes))
+		for _, node := range nodes {
+			nodeEntities = append(nodeEntities, node)
+		}
+		entitiesByType[common.NodeEntityType] = nodeEntities
+	}
+
+	// Добавляем измерения
+	measurements, err := s.transport.entityRegistry.Measurement.GetAllEntities()
+	if err != nil {
+		log.Error().
+			Err(err).
+			Str("node_id", s.transport.localNode.GetID()).
+			Msg("error getting measurements")
+	} else {
+		measurementEntities := make([]common.Entity, 0, len(measurements))
+		for _, measurement := range measurements {
+			measurementEntities = append(measurementEntities, measurement)
+		}
+		entitiesByType[common.MeasurementEntityType] = measurementEntities
+	}
+
+	// Добавляем группы
+	groups, err := s.transport.entityRegistry.Group.GetAllEntities()
+	if err != nil {
+		log.Error().
+			Err(err).
+			Str("node_id", s.transport.localNode.GetID()).
+			Msg("error getting groups")
+	} else {
+		groupEntities := make([]common.Entity, 0, len(groups))
+		for _, group := range groups {
+			groupEntities = append(groupEntities, group)
+		}
+		entitiesByType[common.GroupEntityType] = groupEntities
+	}
+
+	// Добавляем цели групп
+	groupGoals, err := s.transport.entityRegistry.GroupGoal.GetAllEntities()
+	if err != nil {
+		log.Error().
+			Err(err).
+			Str("node_id", s.transport.localNode.GetID()).
+			Msg("error getting group goals")
+	} else {
+		groupGoalEntities := make([]common.Entity, 0, len(groupGoals))
+		for _, groupGoal := range groupGoals {
+			groupGoalEntities = append(groupGoalEntities, groupGoal)
+		}
+		entitiesByType[common.GroupGoalEntityType] = groupGoalEntities
+	}
+
+	nodeEntitiesForLog := make([]entities.Node, 0, len(entitiesByType[common.NodeEntityType]))
+	for _, entity := range entitiesByType[common.NodeEntityType] {
 		if node, ok := entity.(*entities.Node); ok {
-			nodeEntities = append(nodeEntities, *node)
+			nodeEntitiesForLog = append(nodeEntitiesForLog, *node)
 		}
 	}
 
 	log.Debug().
 		Str("local_node_id", s.transport.localNode.GetID()).
 		Str("req_node_id", req.NodeId).
-		Msgf("node entities: %v", nodeEntities)
+		Msgf("node entities: %v", nodeEntitiesForLog)
 
 	requestingNode, err := entities.NodeFromProtoBytes(req.NodeData)
 
@@ -181,7 +242,7 @@ func (s *GossipServiceServer) GetData(ctx context.Context, req *pb.GetDataReques
 			Msg("can't deserialize node data")
 		return nil, err
 	} else {
-		err := s.transport.entityRegistry.StoreEntity(common.NodeEntityType, requestingNode)
+		err := s.transport.entityRegistry.Node.StoreEntity(requestingNode)
 		if err != nil {
 			log.Error().
 				Err(err).
@@ -191,10 +252,9 @@ func (s *GossipServiceServer) GetData(ctx context.Context, req *pb.GetDataReques
 		}
 	}
 
-	// 1) Построим у себя “свои” bucket’ы: map[entityType] → map[bucketIdx] → []Entity
+	// 1) Построим у себя "свои" bucket'ы: map[entityType] → map[bucketIdx] → []Entity
 	typeBucketMap := make(map[string]map[int][]common.Entity)
-	for entityTypeBytes, entities := range entitiesByType {
-		entityType := string(entityTypeBytes)
+	for entityType, entities := range entitiesByType {
 		buckets := make(map[int][]common.Entity, totalBuckets)
 		for _, entity := range entities {
 			id := entity.GetID()
@@ -204,7 +264,7 @@ func (s *GossipServiceServer) GetData(ctx context.Context, req *pb.GetDataReques
 		typeBucketMap[entityType] = buckets
 	}
 
-	// 2) Пройдём по запросу. Ключ в запросе – “entityType#bucketIdx”, значение – клиентский MD5-хэш.
+	// 2) Пройдём по запросу. Ключ в запросе – "entityType#bucketIdx", значение – клиентский MD5-хэш.
 	respData := make(map[string]*pb.BytesArray)
 
 	for compositeKey, clientHash := range req.BucketHashes {
@@ -234,7 +294,7 @@ func (s *GossipServiceServer) GetData(ctx context.Context, req *pb.GetDataReques
 			}
 		}
 
-		// 4) Сравниваем: если !=, то возвращаем все сущности из этого bucket’a
+		// 4) Сравниваем: если !=, то возвращаем все сущности из этого bucket'a
 		if !bytes.Equal(clientHash, serverHash) {
 			baos := &pb.BytesArray{Items: make([][]byte, 0)}
 
@@ -361,14 +421,74 @@ func (t *GrpcTransport) Stop() error {
 
 // Sync теперь строит Merkle-bucket хэши вместо Bloom-фильтра.
 func (t *GrpcTransport) Sync(targetNode *entities.Node) error {
-	entitiesByType := t.entityRegistry.GetAllEntities()
+	// Получаем все сущности через EntityRegistry
+	entitiesByType := make(map[string][]common.Entity)
 
-	// 1) Разбиваем по типам → по bucket’ам
+	// Добавляем ноды
+	nodes, err := t.entityRegistry.Node.GetAllEntities()
+	if err != nil {
+		log.Error().
+			Err(err).
+			Str("node_id", t.localNode.GetID()).
+			Msg("error getting nodes")
+	} else {
+		nodeEntities := make([]common.Entity, 0, len(nodes))
+		for _, node := range nodes {
+			nodeEntities = append(nodeEntities, node)
+		}
+		entitiesByType[common.NodeEntityType] = nodeEntities
+	}
+
+	// Добавляем измерения
+	measurements, err := t.entityRegistry.Measurement.GetAllEntities()
+	if err != nil {
+		log.Error().
+			Err(err).
+			Str("node_id", t.localNode.GetID()).
+			Msg("error getting measurements")
+	} else {
+		measurementEntities := make([]common.Entity, 0, len(measurements))
+		for _, measurement := range measurements {
+			measurementEntities = append(measurementEntities, measurement)
+		}
+		entitiesByType[common.MeasurementEntityType] = measurementEntities
+	}
+
+	// Добавляем группы
+	groups, err := t.entityRegistry.Group.GetAllEntities()
+	if err != nil {
+		log.Error().
+			Err(err).
+			Str("node_id", t.localNode.GetID()).
+			Msg("error getting groups")
+	} else {
+		groupEntities := make([]common.Entity, 0, len(groups))
+		for _, group := range groups {
+			groupEntities = append(groupEntities, group)
+		}
+		entitiesByType[common.GroupEntityType] = groupEntities
+	}
+
+	// Добавляем цели групп
+	groupGoals, err := t.entityRegistry.GroupGoal.GetAllEntities()
+	if err != nil {
+		log.Error().
+			Err(err).
+			Str("node_id", t.localNode.GetID()).
+			Msg("error getting group goals")
+	} else {
+		groupGoalEntities := make([]common.Entity, 0, len(groupGoals))
+		for _, groupGoal := range groupGoals {
+			groupGoalEntities = append(groupGoalEntities, groupGoal)
+		}
+		entitiesByType[common.GroupGoalEntityType] = groupGoalEntities
+	}
+
+	// 1) Разбиваем по типам → по bucket'ам
 	// typeBucketMap: map[entityType] → map[bucketIdx] → []Entity
 	typeBucketMap := make(map[string]map[int][]common.Entity)
 
-	for entityTypeBytes, entities := range entitiesByType {
-		entityType := string(entityTypeBytes)
+	for entityType, entities := range entitiesByType {
 		buckets := make(map[int][]common.Entity, totalBuckets)
 		for _, entity := range entities {
 			id := entity.GetID()
@@ -440,7 +560,7 @@ func (t *GrpcTransport) Sync(targetNode *entities.Node) error {
 		return fmt.Errorf("error sending message to node %s: %v", targetNode.ID, err)
 	}
 
-	// 4) Обрабатываем ответ: получим только те “entityType#bucketIdx”, где MD5 !=
+	// 4) Обрабатываем ответ: получим только те "entityType#bucketIdx", где MD5 !=
 	for compositeKey, bytesArray := range resp.Data {
 		parts := strings.SplitN(compositeKey, "#", 2)
 		if len(parts) != 2 {
@@ -451,7 +571,8 @@ func (t *GrpcTransport) Sync(targetNode *entities.Node) error {
 
 		for _, entityBytes := range bytesArray.Items {
 			// В зависимости от entityType десериализуем в конкретный объект.
-			if entityType == common.NodeEntityType {
+			switch entityType {
+			case common.NodeEntityType:
 				node, err := entities.NodeFromProtoBytes(entityBytes)
 				if err != nil {
 					log.Error().
@@ -461,7 +582,7 @@ func (t *GrpcTransport) Sync(targetNode *entities.Node) error {
 						Msg("error deserializing node entity")
 					continue
 				}
-				if err := t.entityRegistry.StoreEntity(common.NodeEntityType, node); err != nil {
+				if err := t.entityRegistry.Node.StoreEntity(node); err != nil {
 					log.Error().
 						Err(err).
 						Str("node_id", t.localNode.GetID()).
@@ -469,11 +590,65 @@ func (t *GrpcTransport) Sync(targetNode *entities.Node) error {
 						Str("entity_id", node.GetID()).
 						Msg("error storing node entity")
 				}
-			} else {
+			case common.MeasurementEntityType:
+				measurement, err := entities.MeasurementFromProtoBytes(entityBytes)
+				if err != nil {
+					log.Error().
+						Err(err).
+						Str("node_id", t.localNode.GetID()).
+						Str("entity_type", entityType).
+						Msg("error deserializing measurement entity")
+					continue
+				}
+				if err := t.entityRegistry.Measurement.StoreEntity(measurement); err != nil {
+					log.Error().
+						Err(err).
+						Str("node_id", t.localNode.GetID()).
+						Str("entity_type", entityType).
+						Str("entity_id", measurement.GetID()).
+						Msg("error storing measurement entity")
+				}
+			case common.GroupEntityType:
+				group, err := entities.GroupFromProtoBytes(entityBytes)
+				if err != nil {
+					log.Error().
+						Err(err).
+						Str("node_id", t.localNode.GetID()).
+						Str("entity_type", entityType).
+						Msg("error deserializing group entity")
+					continue
+				}
+				if err := t.entityRegistry.Group.StoreEntity(group); err != nil {
+					log.Error().
+						Err(err).
+						Str("node_id", t.localNode.GetID()).
+						Str("entity_type", entityType).
+						Str("entity_id", group.GetID()).
+						Msg("error storing group entity")
+				}
+			case common.GroupGoalEntityType:
+				groupGoal, err := entities.GroupGoalFromProtoBytes(entityBytes)
+				if err != nil {
+					log.Error().
+						Err(err).
+						Str("node_id", t.localNode.GetID()).
+						Str("entity_type", entityType).
+						Msg("error deserializing group goal entity")
+					continue
+				}
+				if err := t.entityRegistry.GroupGoal.StoreEntity(groupGoal); err != nil {
+					log.Error().
+						Err(err).
+						Str("node_id", t.localNode.GetID()).
+						Str("entity_type", entityType).
+						Str("entity_id", groupGoal.GetID()).
+						Msg("error storing group goal entity")
+				}
+			default:
 				log.Debug().
 					Str("node_id", t.localNode.GetID()).
 					Str("entity_type", entityType).
-					Msg("unsupported  entity type")
+					Msg("unsupported entity type")
 			}
 		}
 	}

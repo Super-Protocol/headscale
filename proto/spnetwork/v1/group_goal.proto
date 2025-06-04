@@ -1,0 +1,24 @@
+syntax = "proto3";
+
+package network;
+
+option go_package = "github.com/juanfont/headscale/gen/go/spnetwork/v1";
+
+// DimensionCriterion описывает критерий для измерения
+message DimensionCriterion {
+  string type = 1;
+  string condition = 2;
+  repeated double values = 3;
+}
+
+// GroupGoal описывает цель формирования групп нод
+message GroupGoal {
+  string id = 1;
+  int32 min_group_size = 2;
+  int32 max_group_size = 3;
+  optional int32 max_groups = 4;
+  int64 inactivity_timeout = 5;
+  repeated DimensionCriterion dimension_criteria = 6;
+  uint64 version = 7;
+  bool deleted = 8;
+}

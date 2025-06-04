@@ -1,6 +1,6 @@
 package common
 
-type EntityRegistry interface {
+type Registry interface {
 	StoreEntity(entityType string, entity Entity) error
 	GetEntity(entityType string, entityID string) (Entity, bool)
 	GetAllEntitiesByType(entityType string) []Entity

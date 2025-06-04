@@ -3,6 +3,7 @@ package entities
 import (
 	"crypto/md5"
 	"encoding/binary"
+	"github.com/google/uuid"
 	p "github.com/juanfont/headscale/gen/go/spnetwork/v1"
 	"google.golang.org/protobuf/proto"
 	"sort"
@@ -12,18 +13,18 @@ import (
 
 type Node struct {
 	ID         string
-	Properties map[string]string
-	Version    uint64
-	Deleted    bool
+	properties map[string]string
+	version    uint64
+	deleted    bool
 	mu         sync.RWMutex
 }
 
-func NewNode(id string) *Node {
+func NewNode() *Node {
 	return &Node{
-		ID:         id,
-		Properties: make(map[string]string),
-		Version:    0,
-		Deleted:    false,
+		ID:         uuid.New().String(),
+		properties: make(map[string]string),
+		version:    0,
+		deleted:    false,
 	}
 }
 
@@ -34,13 +35,13 @@ func (n *Node) GetID() string {
 func (n *Node) GetVersion() uint64 {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
-	return n.Version
+	return n.version
 }
 
 func (n *Node) IsDeleted() bool {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
-	return n.Deleted
+	return n.deleted
 }
 
 func (n *Node) GetHash() []byte {
@@ -49,22 +50,22 @@ func (n *Node) GetHash() []byte {
 	h := md5.New()
 	h.Write([]byte(n.ID))
 
-	keys := make([]string, 0, len(n.Properties))
-	for k := range n.Properties {
+	keys := make([]string, 0, len(n.properties))
+	for k := range n.properties {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
 
 	for _, k := range keys {
 		h.Write([]byte(k))
-		h.Write([]byte(n.Properties[k]))
+		h.Write([]byte(n.properties[k]))
 	}
 
-	err := binary.Write(h, binary.LittleEndian, n.Version)
+	err := binary.Write(h, binary.LittleEndian, n.version)
 	if err != nil {
 		return nil
 	}
-	if n.Deleted {
+	if n.deleted {
 		h.Write([]byte{1})
 	} else {
 		h.Write([]byte{0})
@@ -78,9 +79,9 @@ func (n *Node) ToProto() *p.Node {
 	defer n.mu.RUnlock()
 	return &p.Node{
 		Id:         n.ID,
-		Properties: n.Properties,
-		Version:    n.Version,
-		Deleted:    n.Deleted,
+		Properties: n.properties,
+		Version:    n.version,
+		Deleted:    n.deleted,
 	}
 }
 
@@ -93,7 +94,7 @@ func (n *Node) Serialize() ([]byte, error) {
 func (n *Node) GetHost() (string, bool) {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
-	value, ok := n.Properties["host"]
+	value, ok := n.properties["host"]
 	if !ok {
 		return "", false
 	}
@@ -103,14 +104,14 @@ func (n *Node) GetHost() (string, bool) {
 func (n *Node) SetHost(value string) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	n.Properties["host"] = value
-	n.Version++
+	n.properties["host"] = value
+	n.version++
 }
 
 func (n *Node) GetGossipPort() (uint16, bool) {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
-	value, ok := n.Properties["gossip_port"]
+	value, ok := n.properties["gossip_port"]
 	if !ok {
 		return 0, false
 	}
@@ -125,14 +126,14 @@ func (n *Node) GetGossipPort() (uint16, bool) {
 func (n *Node) SetGossipPort(value uint16) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	n.Properties["gossip_port"] = strconv.Itoa(int(value))
-	n.Version++
+	n.properties["gossip_port"] = strconv.Itoa(int(value))
+	n.version++
 }
 
 func (n *Node) GetUdpPingPort() (uint16, bool) {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
-	value, ok := n.Properties["udp_ping_port"]
+	value, ok := n.properties["udp_ping_port"]
 	if !ok {
 		return 0, false
 	}
@@ -147,16 +148,16 @@ func (n *Node) GetUdpPingPort() (uint16, bool) {
 func (n *Node) SetUdpPingPort(value uint16) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	n.Properties["udp_ping_port"] = strconv.Itoa(int(value))
-	n.Version++
+	n.properties["udp_ping_port"] = strconv.Itoa(int(value))
+	n.version++
 }
 
 func NodeFromProto(p *p.Node) *Node {
 	return &Node{
 		ID:         p.Id,
-		Properties: p.Properties,
-		Version:    p.Version,
-		Deleted:    p.Deleted,
+		properties: p.Properties,
+		version:    p.Version,
+		deleted:    p.Deleted,
 	}
 }
 

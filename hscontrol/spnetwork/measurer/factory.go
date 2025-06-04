@@ -8,7 +8,7 @@ import (
 )
 
 // NewUDPPingMeasurerWithDefaults создает UDPPingMeasurer с настройками по умолчанию
-func NewUDPPingMeasurerWithDefaults(registry common.EntityRegistry, localNode *entities.Node, listenHost string, listenPort int) (*UDPPingMeasurer, error) {
+func NewUDPPingMeasurerWithDefaults(registry common.Registry, localNode *entities.Node, listenHost string, listenPort int) (*UDPPingMeasurer, error) {
 	config := UDPPingMeasurerConfig{
 		ListenHost:      listenHost,
 		ListenPort:      listenPort,

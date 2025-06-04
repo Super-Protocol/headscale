@@ -3,5 +3,6 @@ package common
 const (
 	NodeEntityType        = "node"
 	MeasurementEntityType = "measurement"
-	GroupEntityType       = "measurement"
+	GroupEntityType       = "group"
+	GroupGoalEntityType   = "group_goal"
 )

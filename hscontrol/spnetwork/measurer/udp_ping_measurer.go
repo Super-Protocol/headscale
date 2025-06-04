@@ -20,21 +20,19 @@ type UDPPingMeasurerConfig struct {
 
 // UDPPingMeasurer реализует Measurer с использованием UDP для ping запросов
 type UDPPingMeasurer struct {
-	Registry            common.EntityRegistry
-	MeasurementRegistry *common.TypedRegistry[*entities.Measurement]
-	NodeRegistry        *common.TypedRegistry[*entities.Node]
-	localNode           *entities.Node
-	listenAddr          string
-	conn                *net.UDPConn
-	running             bool
-	mu                  sync.Mutex
-	measureInterval     time.Duration
-	stopChan            chan struct{}
-	measureRunning      bool
+	entityRegistry  *common.EntityRegistry
+	localNode       *entities.Node
+	listenAddr      string
+	conn            *net.UDPConn
+	running         bool
+	mu              sync.Mutex
+	measureInterval time.Duration
+	stopChan        chan struct{}
+	measureRunning  bool
 }
 
 // NewUDPPingMeasurer создает новый экземпляр UDPPingMeasurer
-func NewUDPPingMeasurer(registry common.EntityRegistry, localNode *entities.Node, config UDPPingMeasurerConfig) (*UDPPingMeasurer, error) {
+func NewUDPPingMeasurer(entityRegistry *common.EntityRegistry, localNode *entities.Node, config UDPPingMeasurerConfig) (*UDPPingMeasurer, error) {
 	log.Debug().
 		Str("node_id", localNode.GetID()).
 		Str("listen_host", config.ListenHost).
@@ -44,17 +42,12 @@ func NewUDPPingMeasurer(registry common.EntityRegistry, localNode *entities.Node
 
 	listenAddr := fmt.Sprintf("%s:%d", config.ListenHost, config.ListenPort)
 
-	// Получаем локальную ноду
-	nodeRegistry := common.NewTypedRegistry[*entities.Node](registry, common.NodeEntityType)
-
 	measurer := &UDPPingMeasurer{
-		Registry:            registry,
-		MeasurementRegistry: common.NewTypedRegistry[*entities.Measurement](registry, common.MeasurementEntityType),
-		NodeRegistry:        nodeRegistry,
-		localNode:           localNode,
-		listenAddr:          listenAddr,
-		measureInterval:     config.MeasureInterval,
-		stopChan:            make(chan struct{}),
+		entityRegistry:  entityRegistry,
+		localNode:       localNode,
+		listenAddr:      listenAddr,
+		measureInterval: config.MeasureInterval,
+		stopChan:        make(chan struct{}),
 	}
 
 	log.Info().
@@ -266,7 +259,7 @@ func (m *UDPPingMeasurer) runMeasureIfNotRunning() error {
 			m.mu.Unlock()
 		}()
 
-		nodes, err := m.NodeRegistry.GetAllEntities()
+		nodes, err := m.entityRegistry.Node.GetAllEntities()
 		if err != nil {
 			log.Error().
 				Err(err).
@@ -428,7 +421,7 @@ func (m *UDPPingMeasurer) measureNode(targetNode *entities.Node) error {
 
 	// Сохраняем измерение в реестре
 	measurementID := fmt.Sprintf("%s-%s", m.localNode.GetID(), targetNode.GetID())
-	measurement, err := m.MeasurementRegistry.GetEntity(measurementID)
+	measurement, err := m.entityRegistry.Measurement.GetEntity(measurementID)
 	found := measurement != nil
 	if !found {
 		// Создаем новое измерение
@@ -439,7 +432,7 @@ func (m *UDPPingMeasurer) measureNode(targetNode *entities.Node) error {
 			entities.CalculateLatencyClass(rttMs),
 			time.Now().Unix(),
 		)
-		err = m.MeasurementRegistry.StoreEntity(measurement)
+		err = m.entityRegistry.Measurement.StoreEntity(measurement)
 		if err != nil {
 			log.Error().
 				Err(err).
@@ -454,7 +447,7 @@ func (m *UDPPingMeasurer) measureNode(targetNode *entities.Node) error {
 		if measurement.Value != cls {
 			measurement.UpdateValue(cls, time.Now().Unix())
 
-			err = m.MeasurementRegistry.StoreEntity(measurement)
+			err = m.entityRegistry.Measurement.StoreEntity(measurement)
 			if err != nil {
 				log.Error().
 					Err(err).

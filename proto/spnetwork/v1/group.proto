@@ -7,10 +7,7 @@ option go_package = "github.com/juanfont/headscale/gen/go/spnetwork/v1";
 message Group {
   string id = 1;
   string goal = 2;
-  uint32 min_size = 3;
-  uint32 max_size = 4;
   repeated string participants = 5;
-  bool ready = 6;
   uint64 version = 7;
   bool deleted = 8;
 }
