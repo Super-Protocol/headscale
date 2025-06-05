@@ -7,7 +7,7 @@ option go_package = "github.com/juanfont/headscale/gen/go/spnetwork/v1";
 message Measurement {
   string owner = 1;
   string target = 2;
-  int32 type = 3;
+  string type = 3;
   double value = 4;
   int64 date_unix = 5;
   uint64 version = 6;

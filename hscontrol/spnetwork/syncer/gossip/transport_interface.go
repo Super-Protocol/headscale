@@ -6,6 +6,7 @@ type SyncerTransport interface {
 	Start() error
 	Stop() error
 	Sync(targetNode *entities.Node) error
+	GetSyncCoef() float32
 }
 
 type TransportConfig struct {

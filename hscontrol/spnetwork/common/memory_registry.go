@@ -47,9 +47,9 @@ func (r *MemoryEntityRegistry) GetEntity(entityType string, id string) (Entity, 
 	return nil, false
 }
 
-func (r *MemoryEntityRegistry) StoreEntity(entityType string, entity Entity) error {
+func (r *MemoryEntityRegistry) StoreEntity(entityType string, entity Entity) (bool, error) {
 	if entity == nil {
-		return fmt.Errorf("cannot save nil entity")
+		return false, fmt.Errorf("cannot save nil entity")
 	}
 
 	entityID := entity.GetID()
@@ -63,12 +63,12 @@ func (r *MemoryEntityRegistry) StoreEntity(entityType string, entity Entity) err
 			// If deleted do nothing
 			if deletedMap, exists := r.deletedEntities[entityType]; exists {
 				if _, exists := deletedMap[entityID]; exists {
-					return nil
+					return false, nil
 				}
 			}
 
 			if entity.GetVersion() <= existingEntity.GetVersion() {
-				return nil
+				return false, nil
 			}
 		}
 	} else {
@@ -76,7 +76,7 @@ func (r *MemoryEntityRegistry) StoreEntity(entityType string, entity Entity) err
 	}
 
 	r.entities[entityType][entityID] = entity
-	return nil
+	return true, nil
 }
 
 func (r *MemoryEntityRegistry) DeleteEntity(entityType string, id string) error {

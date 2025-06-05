@@ -46,6 +46,10 @@ func (g *Gossip) Stop() error {
 	return g.Transport.Stop()
 }
 
+func (g *Gossip) GetSyncCoef() float32 {
+	return g.Transport.GetSyncCoef()
+}
+
 func (g *Gossip) syncLoop() {
 	ticker := time.NewTicker(g.syncInterval)
 	defer ticker.Stop()

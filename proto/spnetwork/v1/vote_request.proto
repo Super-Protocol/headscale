@@ -1,0 +1,28 @@
+syntax = "proto3";
+package spnetwork.v1;
+
+option go_package = "github.com/juanfont/headscale/gen/go/spnetwork/v1";
+
+// VoteRequest представляет запрос на голосование в системе
+message VoteRequest {
+  // Уникальный идентификатор запроса на голосование
+  string id = 1;
+  
+  // Тип запроса на голосование (например, network_leadership)
+  string kind = 2;
+  
+  // Цель запроса на голосование (обычно ID узла)
+  string target = 3;
+  
+  // Время создания запроса в формате Unix timestamp
+  int64 date_unix = 4;
+  
+  // Версия для отслеживания изменений
+  uint64 version = 5;
+  
+  // Флаг удаления
+  bool deleted = 6;
+  
+  // Время ожидания в секундах для голосования
+  int64 timeout_secs = 7;
+}

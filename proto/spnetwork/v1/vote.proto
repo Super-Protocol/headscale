@@ -1,0 +1,34 @@
+syntax = "proto3";
+package spnetwork.v1;
+
+option go_package = "github.com/juanfont/headscale/gen/go/spnetwork/v1";
+
+// Vote представляет сущность голоса в системе
+message Vote {
+  // Уникальный идентификатор голоса
+  string id = 1;
+  
+  // Идентификатор запроса, связанного с голосом
+  string request_id = 2;
+  
+  // Тип голоса (например, network_leadership)
+  string kind = 3;
+  
+  // Цель голосования (обычно ID узла)
+  string target = 4;
+  
+  // Значение голоса
+  int32 value = 5;
+  
+  // Время создания голоса в формате Unix timestamp
+  int64 date_unix = 6;
+  
+  // Версия для отслеживания изменений
+  uint64 version = 7;
+  
+  // Флаг удаления
+  bool deleted = 8;
+  
+  // Идентификатор голосующей ноды
+  string voter = 9;
+}

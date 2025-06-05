@@ -6,25 +6,33 @@ import (
 	"github.com/google/uuid"
 	p "github.com/juanfont/headscale/gen/go/spnetwork/v1"
 	"google.golang.org/protobuf/proto"
-	"sort"
 	"sync"
+	"time"
 )
 
-type Group struct {
+// Participant представляет участника группы с временем присоединения
+type Participant struct {
 	ID           string
-	Goal         string
-	Participants []string
-	Version      uint64
-	Deleted      bool
-	mu           sync.RWMutex
+	JoinDateUnix int64
+}
+
+type Group struct {
+	ID               string
+	Goal             string
+	Participants     []Participant
+	Version          uint64
+	Deleted          bool
+	CreationDateUnix int64
+	mu               sync.RWMutex
 }
 
 func NewGroup() *Group {
 	return &Group{
-		ID:           uuid.New().String(),
-		Participants: make([]string, 0),
-		Version:      0,
-		Deleted:      false,
+		ID:               uuid.New().String(),
+		Participants:     make([]Participant, 0),
+		Version:          0,
+		Deleted:          false,
+		CreationDateUnix: time.Now().Unix(),
 	}
 }
 
@@ -47,33 +55,17 @@ func (g *Group) IsDeleted() bool {
 	return g.Deleted
 }
 
-// GetHash вычисляет хеш для группы
+// GetHash вычисляет хеш для группы, используя только ID и Version
 func (g *Group) GetHash() []byte {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 
 	h := md5.New()
 	h.Write([]byte(g.ID))
-	h.Write([]byte(g.Goal))
-
-	// Сортируем участников для стабильного хеша
-	participants := make([]string, len(g.Participants))
-	copy(participants, g.Participants)
-	sort.Strings(participants)
-
-	for _, participant := range participants {
-		h.Write([]byte(participant))
-	}
 
 	err := binary.Write(h, binary.LittleEndian, g.Version)
 	if err != nil {
 		return nil
-	}
-
-	if g.Deleted {
-		h.Write([]byte{1})
-	} else {
-		h.Write([]byte{0})
 	}
 
 	return h.Sum(nil)
@@ -84,12 +76,21 @@ func (g *Group) ToProto() *p.Group {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 
+	protoParticipants := make([]*p.Participant, len(g.Participants))
+	for i, participant := range g.Participants {
+		protoParticipants[i] = &p.Participant{
+			Id:           participant.ID,
+			JoinDateUnix: participant.JoinDateUnix,
+		}
+	}
+
 	return &p.Group{
-		Id:           g.ID,
-		Goal:         g.Goal,
-		Participants: g.Participants,
-		Version:      g.Version,
-		Deleted:      g.Deleted,
+		Id:               g.ID,
+		Goal:             g.Goal,
+		Participants:     protoParticipants,
+		Version:          g.Version,
+		Deleted:          g.Deleted,
+		CreationDateUnix: g.CreationDateUnix,
 	}
 }
 
@@ -113,38 +114,51 @@ func (g *Group) SetGoal(goal string) {
 	g.Version++
 }
 
-// GetParticipants возвращает список участников группы
-func (g *Group) GetParticipants() []string {
+// GetParticipants возвращает список идентификаторов участников группы
+func (g *Group) GetParticipants() []Participant {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
-	result := make([]string, len(g.Participants))
+	return g.Participants
+}
+
+// GetParticipantObjects возвращает список объектов участников группы
+func (g *Group) GetParticipantObjects() []Participant {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	result := make([]Participant, len(g.Participants))
 	copy(result, g.Participants)
 	return result
 }
 
 // AddParticipant добавляет участника в группу и увеличивает версию
-func (g *Group) AddParticipant(participant string) {
+func (g *Group) AddParticipant(participantID string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
 	// Проверяем, что участник еще не добавлен
 	for _, prt := range g.Participants {
-		if prt == participant {
+		if prt.ID == participantID {
 			return
 		}
 	}
 
-	g.Participants = append(g.Participants, participant)
+	// Создаем нового участника с текущим временем
+	newParticipant := Participant{
+		ID:           participantID,
+		JoinDateUnix: time.Now().Unix(),
+	}
+
+	g.Participants = append(g.Participants, newParticipant)
 	g.Version++
 }
 
 // RemoveParticipant удаляет участника из группы и увеличивает версию
-func (g *Group) RemoveParticipant(participant string) {
+func (g *Group) RemoveParticipant(participantID string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
 	for i, prt := range g.Participants {
-		if prt == participant {
+		if prt.ID == participantID {
 			g.Participants = append(g.Participants[:i], g.Participants[i+1:]...)
 			g.Version++
 			return
@@ -162,12 +176,21 @@ func (g *Group) MarkDeleted() {
 
 // GroupFromProto создает Group из protobuf сообщения
 func GroupFromProto(p *p.Group) *Group {
+	participants := make([]Participant, len(p.Participants))
+	for i, participant := range p.Participants {
+		participants[i] = Participant{
+			ID:           participant.Id,
+			JoinDateUnix: participant.JoinDateUnix,
+		}
+	}
+
 	return &Group{
-		ID:           p.Id,
-		Goal:         p.Goal,
-		Participants: p.Participants,
-		Version:      p.Version,
-		Deleted:      p.Deleted,
+		ID:               p.Id,
+		Goal:             p.Goal,
+		Participants:     participants,
+		Version:          p.Version,
+		Deleted:          p.Deleted,
+		CreationDateUnix: p.CreationDateUnix,
 	}
 }
 
@@ -179,4 +202,32 @@ func GroupFromProtoBytes(data []byte) (*Group, error) {
 		return nil, err
 	}
 	return GroupFromProto(protoGroup), nil
+}
+
+// GetParticipantByID возвращает участника по его ID и флаг, найден ли участник
+func (g *Group) GetParticipantByID(participantID string) (Participant, bool) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+
+	for _, participant := range g.Participants {
+		if participant.ID == participantID {
+			return participant, true
+		}
+	}
+
+	return Participant{}, false
+}
+
+// GetParticipantJoinDate возвращает время присоединения участника и флаг, найден ли участник
+func (g *Group) GetParticipantJoinDate(participantID string) (int64, bool) {
+	participant, found := g.GetParticipantByID(participantID)
+	if !found {
+		return 0, false
+	}
+	return participant.JoinDateUnix, true
+}
+
+// GetCreationDate возвращает время создания группы
+func (g *Group) GetCreationDate() int64 {
+	return g.CreationDateUnix
 }

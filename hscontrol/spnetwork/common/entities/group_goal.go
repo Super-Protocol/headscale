@@ -3,8 +3,8 @@ package entities
 import (
 	"crypto/md5"
 	"encoding/binary"
-	p "github.com/juanfont/headscale/gen/go/spnetwork/v1"
 	"github.com/google/uuid"
+	p "github.com/juanfont/headscale/gen/go/spnetwork/v1"
 	"google.golang.org/protobuf/proto"
 	"sync"
 )
@@ -177,7 +177,7 @@ func (g *GroupGoal) MarkDeleted() {
 	g.Version++
 }
 
-// GetHash вычисляет хеш для группировочной цели
+// GetHash вычисляет хеш для группировочной цели, используя только ID и Version
 func (g *GroupGoal) GetHash() []byte {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
@@ -185,40 +185,10 @@ func (g *GroupGoal) GetHash() []byte {
 	h := md5.New()
 	h.Write([]byte(g.ID))
 
-	// Хешируем MinGroupSize
-	binary.Write(h, binary.LittleEndian, int32(g.MinGroupSize))
-
-	// Хешируем MaxGroupSize
-	binary.Write(h, binary.LittleEndian, int32(g.MaxGroupSize))
-
-	// Хешируем MaxGroups, если указан
-	if g.MaxGroups != nil {
-		h.Write([]byte{1})
-		binary.Write(h, binary.LittleEndian, int32(*g.MaxGroups))
-	} else {
-		h.Write([]byte{0})
-	}
-
-	// Хешируем InactivityTimeout
-	binary.Write(h, binary.LittleEndian, g.InactivityTimeout)
-
-	// Хешируем критерии измерений
-	for _, criterion := range g.DimensionCriteria {
-		h.Write([]byte(criterion.Type))
-		h.Write([]byte(criterion.Condition))
-		for _, value := range criterion.Values {
-			binary.Write(h, binary.LittleEndian, value)
-		}
-	}
-
 	// Хешируем версию
-	binary.Write(h, binary.LittleEndian, g.Version)
-
-	// Хешируем признак удаления
-	if g.Deleted {
-		h.Write([]byte{1})
-	} else {
-		h.Write([]byte{0})
+	err := binary.Write(h, binary.LittleEndian, g.Version)
+	if err != nil {
+		panic("cant get hash")
 	}
 
 	return h.Sum(nil)
@@ -272,7 +242,7 @@ func (g *GroupGoal) ToProto() *p.GroupGoal {
 	protoCriteria := make([]*p.DimensionCriterion, len(g.DimensionCriteria))
 	for i, criterion := range g.DimensionCriteria {
 		protoCriterion := &p.DimensionCriterion{
-			Type:      criterion.Type,
+			Type:      string(criterion.Type),
 			Condition: string(criterion.Condition),
 			Values:    criterion.Values,
 		}
@@ -307,7 +277,7 @@ func GroupGoalFromProto(p *p.GroupGoal) *GroupGoal {
 
 	for i, protoCriterion := range p.DimensionCriteria {
 		criterion := DimensionCriterion{
-			Type:      protoCriterion.Type,
+			Type:      MeasurementType(protoCriterion.Type),
 			Condition: DimensionConditionType(protoCriterion.Condition),
 			Values:    protoCriterion.Values,
 		}

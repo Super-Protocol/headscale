@@ -9,11 +9,11 @@ import (
 	"sync"
 )
 
-type MeasurementType int
+type MeasurementType string
 
 const (
-	LatencyClass   MeasurementType = 0
-	BandwidthClass                 = 1
+	LatencyClass   MeasurementType = "latency_class"
+	BandwidthClass                 = "bandwidth_class"
 )
 
 // Константы для классов задержки
@@ -67,39 +67,17 @@ func (m *Measurement) IsDeleted() bool {
 	return m.Deleted
 }
 
-// GetHash вычисляет хеш для измерения
+// GetHash вычисляет хеш для измерения, используя только ID и Version
 func (m *Measurement) GetHash() []byte {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
 	h := md5.New()
-	h.Write([]byte(m.Owner))
-	h.Write([]byte(m.Target))
+	h.Write([]byte(m.GetID()))
 
-	err := binary.Write(h, binary.LittleEndian, m.Type)
+	err := binary.Write(h, binary.LittleEndian, m.Version)
 	if err != nil {
 		return nil
-	}
-
-	err = binary.Write(h, binary.LittleEndian, m.Value)
-	if err != nil {
-		return nil
-	}
-
-	err = binary.Write(h, binary.LittleEndian, m.DateUnix)
-	if err != nil {
-		return nil
-	}
-
-	err = binary.Write(h, binary.LittleEndian, m.Version)
-	if err != nil {
-		return nil
-	}
-
-	if m.Deleted {
-		h.Write([]byte{1})
-	} else {
-		h.Write([]byte{0})
 	}
 
 	return h.Sum(nil)
@@ -113,7 +91,7 @@ func (m *Measurement) ToProto() *p.Measurement {
 	return &p.Measurement{
 		Owner:    m.Owner,
 		Target:   m.Target,
-		Type:     int32(m.Type),
+		Type:     string(m.Type),
 		Value:    m.Value,
 		DateUnix: m.DateUnix,
 		Version:  m.Version,

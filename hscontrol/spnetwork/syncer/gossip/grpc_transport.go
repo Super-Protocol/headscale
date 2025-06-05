@@ -25,6 +25,15 @@ import (
 
 type GrpcTransportConfig TransportConfig
 
+// SyncStat хранит информацию о результатах одной синхронизации
+type SyncStat struct {
+	Timestamp       time.Time // Время синхронизации
+	RemoteNodeID    string    // ID удаленной ноды
+	TotalEntities   int       // Общее количество сущностей
+	DiffEntities    int       // Количество отличающихся сущностей
+	SyncCoefficient float64   // Коэффициент синхронизации для данной операции
+}
+
 type GrpcTransport struct {
 	entityRegistry *common.EntityRegistry
 	localNode      *entities.Node
@@ -35,6 +44,8 @@ type GrpcTransport struct {
 	clientsMu      sync.RWMutex
 	tlsConfig      *tls.Config
 	listenAddr     string
+	syncStats      []SyncStat   // История синхронизаций
+	syncStatsMu    sync.RWMutex // Мьютекс для доступа к истории синхронизаций
 }
 
 // GossipServiceServer represents a gRPC server for message processing
@@ -49,6 +60,8 @@ const (
 	depthBits    = 8
 	totalBuckets = 1 << depthBits
 )
+
+const minSyncIterations = 100
 
 // getBucketIndexFromID возвращает номер корзины [0..totalBuckets-1] для конкретного ID.
 // Мы берём первые depthBits бит из MD5(ID).
@@ -140,6 +153,7 @@ func NewGrpcTransport(entityRegistry *common.EntityRegistry, localNode *entities
 		tlsConfig:      tlsConfig,
 		listenAddr:     listenAddr,
 		entityRegistry: entityRegistry,
+		syncStats:      make([]SyncStat, 0),
 	}
 
 	log.Info().
@@ -221,17 +235,57 @@ func (s *GossipServiceServer) GetData(ctx context.Context, req *pb.GetDataReques
 		entitiesByType[common.GroupGoalEntityType] = groupGoalEntities
 	}
 
+	// Добавляем голоса
+	votes, err := s.transport.entityRegistry.Vote.GetAllEntities()
+	if err != nil {
+		log.Error().
+			Err(err).
+			Str("node_id", s.transport.localNode.GetID()).
+			Msg("error getting votes")
+	} else {
+		voteEntities := make([]common.Entity, 0, len(votes))
+		for _, vote := range votes {
+			voteEntities = append(voteEntities, vote)
+		}
+		entitiesByType[common.VoteEntityType] = voteEntities
+	}
+
+	// Добавляем запросы на голосование
+	voteRequests, err := s.transport.entityRegistry.VoteRequest.GetAllEntities()
+	if err != nil {
+		log.Error().
+			Err(err).
+			Str("node_id", s.transport.localNode.GetID()).
+			Msg("error getting vote requests")
+	} else {
+		voteRequestEntities := make([]common.Entity, 0, len(voteRequests))
+		for _, voteRequest := range voteRequests {
+			voteRequestEntities = append(voteRequestEntities, voteRequest)
+		}
+		entitiesByType[common.VoteRequestEntityType] = voteRequestEntities
+	}
+
+	// Добавляем отказы от лидерства
+	leadershipResigns, err := s.transport.entityRegistry.LeadershipResign.GetAllEntities()
+	if err != nil {
+		log.Error().
+			Err(err).
+			Str("node_id", s.transport.localNode.GetID()).
+			Msg("error getting leadership resigns")
+	} else {
+		leadershipResignEntities := make([]common.Entity, 0, len(leadershipResigns))
+		for _, leadershipResign := range leadershipResigns {
+			leadershipResignEntities = append(leadershipResignEntities, leadershipResign)
+		}
+		entitiesByType[common.LeadershipResignEntityType] = leadershipResignEntities
+	}
+
 	nodeEntitiesForLog := make([]entities.Node, 0, len(entitiesByType[common.NodeEntityType]))
 	for _, entity := range entitiesByType[common.NodeEntityType] {
 		if node, ok := entity.(*entities.Node); ok {
 			nodeEntitiesForLog = append(nodeEntitiesForLog, *node)
 		}
 	}
-
-	log.Debug().
-		Str("local_node_id", s.transport.localNode.GetID()).
-		Str("req_node_id", req.NodeId).
-		Msgf("node entities: %v", nodeEntitiesForLog)
 
 	requestingNode, err := entities.NodeFromProtoBytes(req.NodeData)
 
@@ -242,7 +296,7 @@ func (s *GossipServiceServer) GetData(ctx context.Context, req *pb.GetDataReques
 			Msg("can't deserialize node data")
 		return nil, err
 	} else {
-		err := s.transport.entityRegistry.Node.StoreEntity(requestingNode)
+		_, err := s.transport.entityRegistry.Node.StoreEntity(requestingNode)
 		if err != nil {
 			log.Error().
 				Err(err).
@@ -417,7 +471,122 @@ func (t *GrpcTransport) Stop() error {
 	return nil
 }
 
+// GetSyncCoef возвращает коэффициент синхронизации от 0 до 1, где:
+// 0 - нода полностью рассинхронизирована с остальными
+// 1 - нода полностью синхронизирована
+// Коэффициент рассчитывается как среднее значение за последние maxSyncStats синхронизаций.
+// Если количество синхронизаций меньше minSyncStats, то возвращается 0.
+func (t *GrpcTransport) GetSyncCoef() float32 {
+	t.syncStatsMu.RLock()
+	defer t.syncStatsMu.RUnlock()
+
+	minSyncStats := minSyncIterations
+
+	// Если количество синхронизаций меньше minSyncStats, возвращаем 0
+	if len(t.syncStats) < minSyncStats {
+		log.Debug().
+			Str("node_id", t.localNode.GetID()).
+			Int("current_syncs", len(t.syncStats)).
+			Int("required_syncs", minSyncStats).
+			Msg("Недостаточно данных о синхронизации для расчета коэффициента")
+		return 0.0
+	}
+
+	// Вычисляем среднее значение за последние N синхронизаций
+	startIdx := 0
+	if len(t.syncStats) > minSyncStats {
+		startIdx = len(t.syncStats) - minSyncStats
+	}
+
+	totalCoef := 0.0
+	for i := startIdx; i < len(t.syncStats); i++ {
+		totalCoef += t.syncStats[i].SyncCoefficient
+	}
+
+	avgCoef := float32(totalCoef) / float32(len(t.syncStats)-startIdx)
+
+	log.Debug().
+		Str("node_id", t.localNode.GetID()).
+		Int("stats_count", len(t.syncStats)-startIdx).
+		Float32("sync_coef", avgCoef).
+		Msg("Вычислен коэффициент синхронизации")
+
+	return avgCoef
+}
+
 // =========== CLIENT PART =========== //
+
+func (t *GrpcTransport) getOrCreateClient(node *entities.Node) (*grpc.ClientConn, error) {
+	// Без изменений — копируем ваш код:
+	t.clientsMu.RLock()
+	client, exists := t.clients[node.ID]
+	t.clientsMu.RUnlock()
+	if exists {
+		log.Debug().
+			Str("node_id", t.localNode.GetID()).
+			Str("target_node", node.ID).
+			Msg("using existing client connection")
+		return client, nil
+	}
+
+	t.clientsMu.Lock()
+	defer t.clientsMu.Unlock()
+	if client, exists = t.clients[node.ID]; exists {
+		log.Debug().
+			Str("node_id", t.localNode.GetID()).
+			Str("target_node", node.ID).
+			Msg("using existing client connection (after lock check)")
+		return client, nil
+	}
+
+	host, ok := node.GetHost()
+	if !ok {
+		log.Error().
+			Str("node_id", node.ID).
+			Msg("don't have host property")
+	}
+
+	port, ok := node.GetGossipPort()
+	if !ok {
+		log.Error().
+			Str("node_id", node.ID).
+			Msg("don't have gossip port property")
+	}
+
+	targetAddr := fmt.Sprintf("%s:%d", host, port)
+	log.Debug().
+		Str("node_id", t.localNode.GetID()).
+		Str("target_node", node.ID).
+		Str("target_addr", targetAddr).
+		Msg("creating new client connection")
+
+	creds := credentials.NewTLS(t.tlsConfig)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	conn, err := grpc.DialContext(
+		ctx,
+		targetAddr,
+		grpc.WithTransportCredentials(creds),
+	)
+	if err != nil {
+		log.Error().
+			Err(err).
+			Str("node_id", t.localNode.GetID()).
+			Str("target_node", node.ID).
+			Str("target_addr", targetAddr).
+			Msg("error creating client connection")
+		return nil, err
+	}
+
+	t.clients[node.ID] = conn
+	log.Info().
+		Str("node_id", t.localNode.GetID()).
+		Str("target_node", node.ID).
+		Str("target_addr", targetAddr).
+		Msg("new client connection established")
+	return conn, nil
+}
 
 // Sync теперь строит Merkle-bucket хэши вместо Bloom-фильтра.
 func (t *GrpcTransport) Sync(targetNode *entities.Node) error {
@@ -482,6 +651,51 @@ func (t *GrpcTransport) Sync(targetNode *entities.Node) error {
 			groupGoalEntities = append(groupGoalEntities, groupGoal)
 		}
 		entitiesByType[common.GroupGoalEntityType] = groupGoalEntities
+	}
+
+	// Добавляем голоса
+	votes, err := t.entityRegistry.Vote.GetAllEntities()
+	if err != nil {
+		log.Error().
+			Err(err).
+			Str("node_id", t.localNode.GetID()).
+			Msg("error getting votes")
+	} else {
+		voteEntities := make([]common.Entity, 0, len(votes))
+		for _, vote := range votes {
+			voteEntities = append(voteEntities, vote)
+		}
+		entitiesByType[common.VoteEntityType] = voteEntities
+	}
+
+	// Добавляем запросы на голосование
+	voteRequests, err := t.entityRegistry.VoteRequest.GetAllEntities()
+	if err != nil {
+		log.Error().
+			Err(err).
+			Str("node_id", t.localNode.GetID()).
+			Msg("error getting vote requests")
+	} else {
+		voteRequestEntities := make([]common.Entity, 0, len(voteRequests))
+		for _, voteRequest := range voteRequests {
+			voteRequestEntities = append(voteRequestEntities, voteRequest)
+		}
+		entitiesByType[common.VoteRequestEntityType] = voteRequestEntities
+	}
+
+	// Добавляем отказы от лидерства
+	leadershipResigns, err := t.entityRegistry.LeadershipResign.GetAllEntities()
+	if err != nil {
+		log.Error().
+			Err(err).
+			Str("node_id", t.localNode.GetID()).
+			Msg("error getting leadership resigns")
+	} else {
+		leadershipResignEntities := make([]common.Entity, 0, len(leadershipResigns))
+		for _, leadershipResign := range leadershipResigns {
+			leadershipResignEntities = append(leadershipResignEntities, leadershipResign)
+		}
+		entitiesByType[common.LeadershipResignEntityType] = leadershipResignEntities
 	}
 
 	// 1) Разбиваем по типам → по bucket'ам
@@ -560,6 +774,14 @@ func (t *GrpcTransport) Sync(targetNode *entities.Node) error {
 		return fmt.Errorf("error sending message to node %s: %v", targetNode.ID, err)
 	}
 
+	// Счетчики для статистики синхронизации
+	totalEntities := 0
+	diffEntities := 0
+
+	for _, entities := range entitiesByType {
+		totalEntities += len(entities)
+	}
+
 	// 4) Обрабатываем ответ: получим только те "entityType#bucketIdx", где MD5 !=
 	for compositeKey, bytesArray := range resp.Data {
 		parts := strings.SplitN(compositeKey, "#", 2)
@@ -582,13 +804,15 @@ func (t *GrpcTransport) Sync(targetNode *entities.Node) error {
 						Msg("error deserializing node entity")
 					continue
 				}
-				if err := t.entityRegistry.Node.StoreEntity(node); err != nil {
+				if saved, err := t.entityRegistry.Node.StoreEntity(node); err != nil {
 					log.Error().
 						Err(err).
 						Str("node_id", t.localNode.GetID()).
 						Str("entity_type", entityType).
 						Str("entity_id", node.GetID()).
 						Msg("error storing node entity")
+				} else if saved {
+					diffEntities++
 				}
 			case common.MeasurementEntityType:
 				measurement, err := entities.MeasurementFromProtoBytes(entityBytes)
@@ -600,13 +824,15 @@ func (t *GrpcTransport) Sync(targetNode *entities.Node) error {
 						Msg("error deserializing measurement entity")
 					continue
 				}
-				if err := t.entityRegistry.Measurement.StoreEntity(measurement); err != nil {
+				if saved, err := t.entityRegistry.Measurement.StoreEntity(measurement); err != nil {
 					log.Error().
 						Err(err).
 						Str("node_id", t.localNode.GetID()).
 						Str("entity_type", entityType).
 						Str("entity_id", measurement.GetID()).
 						Msg("error storing measurement entity")
+				} else if saved {
+					diffEntities++
 				}
 			case common.GroupEntityType:
 				group, err := entities.GroupFromProtoBytes(entityBytes)
@@ -618,13 +844,15 @@ func (t *GrpcTransport) Sync(targetNode *entities.Node) error {
 						Msg("error deserializing group entity")
 					continue
 				}
-				if err := t.entityRegistry.Group.StoreEntity(group); err != nil {
+				if saved, err := t.entityRegistry.Group.StoreEntity(group); err != nil {
 					log.Error().
 						Err(err).
 						Str("node_id", t.localNode.GetID()).
 						Str("entity_type", entityType).
 						Str("entity_id", group.GetID()).
 						Msg("error storing group entity")
+				} else if saved {
+					diffEntities++
 				}
 			case common.GroupGoalEntityType:
 				groupGoal, err := entities.GroupGoalFromProtoBytes(entityBytes)
@@ -636,13 +864,75 @@ func (t *GrpcTransport) Sync(targetNode *entities.Node) error {
 						Msg("error deserializing group goal entity")
 					continue
 				}
-				if err := t.entityRegistry.GroupGoal.StoreEntity(groupGoal); err != nil {
+				if saved, err := t.entityRegistry.GroupGoal.StoreEntity(groupGoal); err != nil {
 					log.Error().
 						Err(err).
 						Str("node_id", t.localNode.GetID()).
 						Str("entity_type", entityType).
 						Str("entity_id", groupGoal.GetID()).
 						Msg("error storing group goal entity")
+				} else if saved {
+					diffEntities++
+				}
+			case common.VoteEntityType:
+				vote, err := entities.VoteFromProtoBytes(entityBytes)
+				if err != nil {
+					log.Error().
+						Err(err).
+						Str("node_id", t.localNode.GetID()).
+						Str("entity_type", entityType).
+						Msg("error deserializing vote entity")
+					continue
+				}
+				if saved, err := t.entityRegistry.Vote.StoreEntity(vote); err != nil {
+					log.Error().
+						Err(err).
+						Str("node_id", t.localNode.GetID()).
+						Str("entity_type", entityType).
+						Str("entity_id", vote.GetID()).
+						Msg("error storing vote entity")
+				} else if saved {
+					diffEntities++
+				}
+			case common.VoteRequestEntityType:
+				voteRequest, err := entities.VoteRequestFromProtoBytes(entityBytes)
+				if err != nil {
+					log.Error().
+						Err(err).
+						Str("node_id", t.localNode.GetID()).
+						Str("entity_type", entityType).
+						Msg("error deserializing vote request entity")
+					continue
+				}
+				if saved, err := t.entityRegistry.VoteRequest.StoreEntity(voteRequest); err != nil {
+					log.Error().
+						Err(err).
+						Str("node_id", t.localNode.GetID()).
+						Str("entity_type", entityType).
+						Str("entity_id", voteRequest.GetID()).
+						Msg("error storing vote request entity")
+				} else if saved {
+					diffEntities++
+				}
+			case common.LeadershipResignEntityType:
+				leadershipResign, err := entities.LeadershipResignFromProtoBytes(entityBytes)
+				if err != nil {
+					log.Error().
+						Err(err).
+						Str("node_id", t.localNode.GetID()).
+						Str("entity_type", entityType).
+						Msg("error deserializing leadership resign entity")
+					continue
+				}
+				if saved, err := t.entityRegistry.LeadershipResign.StoreEntity(leadershipResign); err != nil {
+					log.Error().
+						Err(err).
+						Str("node_id", t.localNode.GetID()).
+						Str("entity_type", entityType).
+						Str("entity_id", leadershipResign.GetID()).
+						Msg("error storing leadership resign entity")
+				} else if saved {
+					diffEntities++
 				}
 			default:
 				log.Debug().
@@ -653,81 +943,38 @@ func (t *GrpcTransport) Sync(targetNode *entities.Node) error {
 		}
 	}
 
+	// Вычисляем коэффициент синхронизации для текущей операции
+	// 1.0 означает полную синхронизацию (нет различий)
+	// 0.0 означает полную рассинхронизацию (все сущности отличаются)
+	syncCoef := 1.0
+	if totalEntities > 0 {
+		// Если diffEntities больше totalEntities, ограничиваем соотношение единицей
+		syncRatio := float64(diffEntities) / float64(totalEntities)
+		if syncRatio > 1.0 {
+			syncRatio = 1.0
+		}
+		syncCoef = 1.0 - syncRatio
+	}
+
+	// Сохраняем статистику синхронизации
+	syncStat := SyncStat{
+		Timestamp:       time.Now(),
+		RemoteNodeID:    targetNode.ID,
+		TotalEntities:   totalEntities,
+		DiffEntities:    diffEntities,
+		SyncCoefficient: syncCoef,
+	}
+
+	t.syncStatsMu.Lock()
+	t.syncStats = append(t.syncStats, syncStat)
+	t.syncStatsMu.Unlock()
+
 	log.Debug().
 		Str("node_id", t.localNode.GetID()).
 		Str("target_node", targetNode.ID).
+		Int("total_entities", totalEntities).
+		Int("diff_entities", diffEntities).
+		Float64("sync_coef", syncCoef).
 		Msg("Sync (Merkle) completed successfully")
 	return nil
-}
-
-func (t *GrpcTransport) getOrCreateClient(node *entities.Node) (*grpc.ClientConn, error) {
-	// Без изменений — копируем ваш код:
-	t.clientsMu.RLock()
-	client, exists := t.clients[node.ID]
-	t.clientsMu.RUnlock()
-	if exists {
-		log.Debug().
-			Str("node_id", t.localNode.GetID()).
-			Str("target_node", node.ID).
-			Msg("using existing client connection")
-		return client, nil
-	}
-
-	t.clientsMu.Lock()
-	defer t.clientsMu.Unlock()
-	if client, exists = t.clients[node.ID]; exists {
-		log.Debug().
-			Str("node_id", t.localNode.GetID()).
-			Str("target_node", node.ID).
-			Msg("using existing client connection (after lock check)")
-		return client, nil
-	}
-
-	host, ok := node.GetHost()
-	if !ok {
-		log.Error().
-			Str("node_id", node.ID).
-			Msg("don't have host property")
-	}
-
-	port, ok := node.GetGossipPort()
-	if !ok {
-		log.Error().
-			Str("node_id", node.ID).
-			Msg("don't have gossip port property")
-	}
-
-	targetAddr := fmt.Sprintf("%s:%d", host, port)
-	log.Debug().
-		Str("node_id", t.localNode.GetID()).
-		Str("target_node", node.ID).
-		Str("target_addr", targetAddr).
-		Msg("creating new client connection")
-
-	creds := credentials.NewTLS(t.tlsConfig)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	conn, err := grpc.DialContext(
-		ctx,
-		targetAddr,
-		grpc.WithTransportCredentials(creds),
-	)
-	if err != nil {
-		log.Error().
-			Err(err).
-			Str("node_id", t.localNode.GetID()).
-			Str("target_node", node.ID).
-			Str("target_addr", targetAddr).
-			Msg("error creating client connection")
-		return nil, err
-	}
-
-	t.clients[node.ID] = conn
-	log.Info().
-		Str("node_id", t.localNode.GetID()).
-		Str("target_node", node.ID).
-		Str("target_addr", targetAddr).
-		Msg("new client connection established")
-	return conn, nil
 }

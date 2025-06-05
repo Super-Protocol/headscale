@@ -108,29 +108,41 @@ func (m *UDPPingMeasurer) Start() error {
 // Stop останавливает UDP сервер и измерение задержки
 func (m *UDPPingMeasurer) Stop() error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	if !m.running {
+		m.mu.Unlock()
 		log.Warn().Str("node_id", m.localNode.GetID()).Msg("measurer already stopped")
 		return fmt.Errorf("measurer already stopped")
 	}
 
 	log.Info().Str("node_id", m.localNode.GetID()).Msg("stopping UDP ping measurer")
 
+	// Сначала отмечаем, что сервис остановлен
+	m.running = false
+
+	// Закрываем канал для сигнала горутинам
 	close(m.stopChan)
 
-	if m.conn != nil {
-		if err := m.conn.Close(); err != nil {
+	// Сохраняем ссылку на соединение перед его закрытием
+	conn := m.conn
+
+	// Обнуляем соединение под блокировкой
+	m.conn = nil
+
+	// Разблокируем мьютекс перед потенциально блокирующей операцией Close()
+	m.mu.Unlock()
+
+	// Закрываем соединение после разблокировки мьютекса
+	if conn != nil {
+		if err := conn.Close(); err != nil {
 			log.Error().
 				Err(err).
 				Str("node_id", m.localNode.GetID()).
 				Msg("error closing UDP connection")
 			return err
 		}
-		m.conn = nil
 	}
 
-	m.running = false
 	log.Info().Str("node_id", m.localNode.GetID()).Msg("UDP ping measurer stopped")
 
 	return nil
@@ -141,11 +153,47 @@ func (m *UDPPingMeasurer) handleIncomingPackets() {
 	buffer := make([]byte, 16) // достаточно для int64 timestamp
 
 	for {
-		n, addr, err := m.conn.ReadFromUDP(buffer)
+		// Проверяем сигнал остановки
+		select {
+		case <-m.stopChan:
+			return // нормальное завершение
+		default:
+			// продолжаем выполнение
+		}
+
+		// Безопасно получаем текущее соединение под блокировкой
+		m.mu.Lock()
+		conn := m.conn
+		m.mu.Unlock()
+
+		// Проверяем, что соединение еще активно
+		if conn == nil {
+			// Соединение закрыто, выходим из цикла
+			return
+		}
+
+		// Устанавливаем небольшой таймаут чтения, чтобы периодически проверять сигнал остановки
+		err := conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 		if err != nil {
+			log.Error().
+				Err(err).
+				Str("node_id", m.localNode.GetID()).
+				Msg("error setting read deadline")
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+
+		n, addr, err := conn.ReadFromUDP(buffer)
+		if err != nil {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				// Это просто таймаут чтения, продолжаем
+				continue
+			}
+
+			// Проверяем сигнал остановки еще раз
 			select {
 			case <-m.stopChan:
-				return // нормальное завершение
+				return
 			default:
 				log.Error().
 					Err(err).
@@ -193,7 +241,21 @@ func (m *UDPPingMeasurer) handlePingRequest(addr *net.UDPAddr, requestTimestamp 
 	responseTimestamp := time.Now().UnixNano()
 	binary.BigEndian.PutUint64(responseBuffer[9:17], uint64(responseTimestamp))
 
-	_, err := m.conn.WriteToUDP(responseBuffer, addr)
+	// Безопасно получаем текущее соединение под блокировкой
+	m.mu.Lock()
+	conn := m.conn
+	m.mu.Unlock()
+
+	// Проверяем, что соединение еще активно
+	if conn == nil {
+		log.Debug().
+			Str("node_id", m.localNode.GetID()).
+			Str("remote_addr", addr.String()).
+			Msg("connection closed, skipping ping response")
+		return
+	}
+
+	_, err := conn.WriteToUDP(responseBuffer, addr)
 	if err != nil {
 		log.Error().
 			Err(err).
@@ -337,8 +399,22 @@ func (m *UDPPingMeasurer) measureNode(targetNode *entities.Node) error {
 	requestTimestamp := time.Now().UnixNano()
 	binary.BigEndian.PutUint64(requestBuffer[1:9], uint64(requestTimestamp))
 
+	// Проверяем доступность соединения под блокировкой
+	m.mu.Lock()
+	conn := m.conn
+	m.mu.Unlock()
+
+	// Проверяем, что соединение еще активно
+	if conn == nil {
+		log.Debug().
+			Str("node_id", m.localNode.GetID()).
+			Str("target_node", targetNode.GetID()).
+			Msg("connection already closed, skipping measurement")
+		return nil
+	}
+
 	// Отправляем запрос
-	_, err = m.conn.WriteToUDP(requestBuffer, udpAddr)
+	_, err = conn.WriteToUDP(requestBuffer, udpAddr)
 	if err != nil {
 		log.Error().
 			Err(err).
@@ -349,7 +425,7 @@ func (m *UDPPingMeasurer) measureNode(targetNode *entities.Node) error {
 	}
 
 	// Ждем ответа с таймаутом
-	err = m.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	err = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	if err != nil {
 		log.Error().
 			Err(err).
@@ -366,7 +442,19 @@ func (m *UDPPingMeasurer) measureNode(targetNode *entities.Node) error {
 	startTime := time.Now()
 
 	for time.Since(startTime) < 2*time.Second {
-		n, addr, err := m.conn.ReadFromUDP(responseBuffer)
+		// Проверяем наличие сигнала остановки
+		select {
+		case <-m.stopChan:
+			log.Debug().
+				Str("node_id", m.localNode.GetID()).
+				Str("target_node", targetNode.GetID()).
+				Msg("stopping measurement due to stop signal")
+			return nil
+		default:
+			// Продолжаем выполнение
+		}
+
+		n, addr, err := conn.ReadFromUDP(responseBuffer)
 		if err != nil {
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 				break // Таймаут
@@ -397,7 +485,7 @@ func (m *UDPPingMeasurer) measureNode(targetNode *entities.Node) error {
 	}
 
 	// Сбрасываем таймаут
-	err = m.conn.SetReadDeadline(time.Time{})
+	err = conn.SetReadDeadline(time.Time{})
 	if err != nil {
 		log.Error().
 			Err(err).
@@ -432,7 +520,7 @@ func (m *UDPPingMeasurer) measureNode(targetNode *entities.Node) error {
 			entities.CalculateLatencyClass(rttMs),
 			time.Now().Unix(),
 		)
-		err = m.entityRegistry.Measurement.StoreEntity(measurement)
+		_, err = m.entityRegistry.Measurement.StoreEntity(measurement)
 		if err != nil {
 			log.Error().
 				Err(err).
@@ -447,7 +535,7 @@ func (m *UDPPingMeasurer) measureNode(targetNode *entities.Node) error {
 		if measurement.Value != cls {
 			measurement.UpdateValue(cls, time.Now().Unix())
 
-			err = m.entityRegistry.Measurement.StoreEntity(measurement)
+			_, err = m.entityRegistry.Measurement.StoreEntity(measurement)
 			if err != nil {
 				log.Error().
 					Err(err).

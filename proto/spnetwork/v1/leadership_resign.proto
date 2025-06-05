@@ -1,0 +1,25 @@
+syntax = "proto3";
+package spnetwork.v1;
+
+option go_package = "github.com/juanfont/headscale/gen/go/spnetwork/v1";
+
+// LeadershipResign представляет сущность отказа от лидерства в сети
+message LeadershipResign {
+  // Уникальный идентификатор отказа от лидерства
+  string id = 1;
+  
+  // Идентификатор владельца (узла), отказывающегося от лидерства
+  string owner = 2;
+  
+  // Идентификатор связанного запроса на голосование
+  string vote_request_id = 3;
+  
+  // Время создания в формате Unix timestamp
+  int64 date_unix = 4;
+  
+  // Версия для отслеживания изменений
+  uint64 version = 5;
+  
+  // Флаг удаления
+  bool deleted = 6;
+}

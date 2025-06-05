@@ -6,7 +6,6 @@ import (
 	"github.com/google/uuid"
 	p "github.com/juanfont/headscale/gen/go/spnetwork/v1"
 	"google.golang.org/protobuf/proto"
-	"sort"
 	"strconv"
 	"sync"
 )
@@ -50,25 +49,9 @@ func (n *Node) GetHash() []byte {
 	h := md5.New()
 	h.Write([]byte(n.ID))
 
-	keys := make([]string, 0, len(n.properties))
-	for k := range n.properties {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	for _, k := range keys {
-		h.Write([]byte(k))
-		h.Write([]byte(n.properties[k]))
-	}
-
 	err := binary.Write(h, binary.LittleEndian, n.version)
 	if err != nil {
 		return nil
-	}
-	if n.deleted {
-		h.Write([]byte{1})
-	} else {
-		h.Write([]byte{0})
 	}
 
 	return h.Sum(nil)

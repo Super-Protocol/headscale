@@ -14,15 +14,14 @@ import (
 )
 
 type SPNetwork struct {
-	LocalNode    *entities.Node
-	Syncer       syncer.Syncer
-	Consensus    consensus.Consensus
-	Measurer     measurer.Measurer
-	Grouping     grouping.Grouping
-	nodeRegistry *common.TypedRegistry[*entities.Node]
-	registry     common.Registry
-	mu           sync.Mutex
-	running      bool
+	LocalNode *entities.Node
+	Syncer    syncer.Syncer
+	Consensus consensus.Consensus
+	Measurer  measurer.Measurer
+	Grouping  grouping.Grouping
+	registry  *common.EntityRegistry
+	mu        sync.Mutex
+	running   bool
 }
 
 type PkiConfig struct {
@@ -31,20 +30,7 @@ type PkiConfig struct {
 	CaFile   string
 }
 
-func NewSPNetwork(localNode *entities.Node, bootstrapNodes []*entities.Node, pkiConfig PkiConfig) (*SPNetwork, error) {
-	syncerRegistry := common.NewMemoryEntityRegistry()
-	nodeRegistry := common.NewTypedRegistry[*entities.Node](syncerRegistry, common.NodeEntityType)
-	err := nodeRegistry.StoreEntity(localNode)
-	if err != nil {
-		return nil, err
-	}
-
-	for _, n := range bootstrapNodes {
-		err := nodeRegistry.StoreEntity(n)
-		if err != nil {
-			return nil, err
-		}
-	}
+func NewSPNetwork(registry *common.EntityRegistry, localNode *entities.Node, pkiConfig PkiConfig) (*SPNetwork, error) {
 	host, _ := localNode.GetHost()
 	port, _ := localNode.GetGossipPort()
 	transportConfig := g.GrpcTransportConfig{
@@ -55,24 +41,41 @@ func NewSPNetwork(localNode *entities.Node, bootstrapNodes []*entities.Node, pki
 		KeyFile:    pkiConfig.KeyFile,
 		CaFile:     pkiConfig.CaFile,
 	}
-	syncerTransport, err := g.NewGrpcTransport(syncerRegistry, localNode, transportConfig)
+	syncerTransport, err := g.NewGrpcTransport(registry, localNode, transportConfig)
 	if err != nil {
 		return nil, err
 	}
-	s := g.NewGossip(syncerRegistry, localNode.ID, syncerTransport, time.Duration(1)*time.Second)
+	s := g.NewGossip(registry, localNode.ID, syncerTransport, time.Duration(100)*time.Millisecond)
 
-	udpPingPort, _ := localNode.GetUdpPingPort()
-	m, err := measurer.NewUDPPingMeasurerWithDefaults(syncerRegistry, localNode, host, int(udpPingPort))
+	c, err := consensus.NewDeterministicConsensus(s, registry, localNode, time.Duration(200)*time.Millisecond)
+
+	if err != nil {
+		return nil, err
+	}
+
+	//udpPingPort, _ := localNode.GetUdpPingPort()
+	//m, err := measurer.NewUDPPingMeasurerWithDefaults(registry, localNode, host, int(udpPingPort))
+	m, err := measurer.NewMonkeyMeasurer(registry, localNode, measurer.MonkeyMeasurerConfig{
+		MeasureInterval:            time.Duration(500) * time.Millisecond,
+		NewValueProbability:        0.05,
+		NodeUnavailableProbability: 0.01,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	grouping, err := grouping.NewDeterministicGrouping(registry, localNode, time.Duration(1)*time.Second)
 	if err != nil {
 		return nil, err
 	}
 
 	n := &SPNetwork{
-		LocalNode:    localNode,
-		Syncer:       s,
-		Measurer:     m,
-		nodeRegistry: nodeRegistry,
-		registry:     syncerRegistry,
+		LocalNode: localNode,
+		Syncer:    s,
+		Measurer:  m,
+		Grouping:  grouping,
+		Consensus: c,
+		registry:  registry,
 	}
 	return n, nil
 }
@@ -97,12 +100,11 @@ func (n *SPNetwork) Start() error {
 		return err
 	}
 
-	//err = n.Consensus.Join()
-	//if err != nil {
-	//	return err
-	//}
-	//
-	//
+	err = n.Consensus.Start()
+	if err != nil {
+		return err
+	}
+
 	//err = n.Grouping.Start()
 	//if err != nil {
 	//	return err
@@ -119,16 +121,17 @@ func (n *SPNetwork) Stop() error {
 		return fmt.Errorf("network is already stopped")
 	}
 
+	err := n.Consensus.Stop()
+	if err != nil {
+		return err
+	}
+
 	//err := n.Grouping.Stop()
 	//if err != nil {
 	//	return err
 	//}
-	//
-	//err = n.Consensus.Leave()
-	//if err != nil {
-	//	return err
-	//}
-	err := n.Measurer.Stop()
+
+	err = n.Measurer.Stop()
 	if err != nil {
 		return err
 	}

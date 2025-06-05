@@ -10,21 +10,27 @@ import (
 )
 
 type EntityRegistry struct {
-	baseRegistry Registry
-	Node         *TypedRegistry[*entities.Node]
-	Measurement  *TypedRegistry[*entities.Measurement]
-	Group        *TypedRegistry[*entities.Group]
-	GroupGoal    *TypedRegistry[*entities.GroupGoal]
+	BaseRegistry     Registry
+	Node             *TypedRegistry[*entities.Node]
+	Measurement      *TypedRegistry[*entities.Measurement]
+	Group            *TypedRegistry[*entities.Group]
+	GroupGoal        *TypedRegistry[*entities.GroupGoal]
+	Vote             *TypedRegistry[*entities.Vote]
+	VoteRequest      *TypedRegistry[*entities.VoteRequest]
+	LeadershipResign *TypedRegistry[*entities.LeadershipResign]
 }
 
 // NewEntityRegistry creates a new instance of Registry
 func NewEntityRegistry(baseRegistry Registry) *EntityRegistry {
 	return &EntityRegistry{
-		baseRegistry: baseRegistry,
-		Node:         NewTypedRegistry[*entities.Node](baseRegistry, NodeEntityType),
-		Measurement:  NewTypedRegistry[*entities.Measurement](baseRegistry, MeasurementEntityType),
-		Group:        NewTypedRegistry[*entities.Group](baseRegistry, GroupEntityType),
-		GroupGoal:    NewTypedRegistry[*entities.GroupGoal](baseRegistry, GroupGoalEntityType),
+		BaseRegistry:     baseRegistry,
+		Node:             NewTypedRegistry[*entities.Node](baseRegistry, NodeEntityType),
+		Measurement:      NewTypedRegistry[*entities.Measurement](baseRegistry, MeasurementEntityType),
+		Group:            NewTypedRegistry[*entities.Group](baseRegistry, GroupEntityType),
+		GroupGoal:        NewTypedRegistry[*entities.GroupGoal](baseRegistry, GroupGoalEntityType),
+		Vote:             NewTypedRegistry[*entities.Vote](baseRegistry, VoteEntityType),
+		VoteRequest:      NewTypedRegistry[*entities.VoteRequest](baseRegistry, VoteRequestEntityType),
+		LeadershipResign: NewTypedRegistry[*entities.LeadershipResign](baseRegistry, LeadershipResignEntityType),
 	}
 }
 
@@ -75,7 +81,7 @@ func (er *EntityRegistry) GetNodeLastSeenTime(nodeID string) (time.Time, error) 
 // IsNodeAlive checks if the node with the specified ID is considered alive based on the timeout.
 // It returns true if the node was seen within the specified timeout period, false otherwise.
 // If there's an error retrieving the last seen time, it returns false.
-func (er *EntityRegistry) IsNodeAlive(nodeID string, timeoutSecs int) bool {
+func (er *EntityRegistry) IsNodeAlive(nodeID string, timeoutSecs int64) bool {
 	lastSeenTime, err := er.GetNodeLastSeenTime(nodeID)
 	if err != nil {
 		return false
@@ -86,7 +92,7 @@ func (er *EntityRegistry) IsNodeAlive(nodeID string, timeoutSecs int) bool {
 
 	log.Debug().
 		Str("node_id", nodeID).
-		Int("timeout_secs", timeoutSecs).
+		Int64("timeout_secs", timeoutSecs).
 		Time("last_seen", lastSeenTime).
 		Bool("is_alive", isAlive).
 		Msg("node alive status checked")
@@ -100,7 +106,7 @@ func (er *EntityRegistry) IsNodeAlive(nodeID string, timeoutSecs int) bool {
 // 3. Список нод, не входящих в группы с данной целью
 // А также булево значение, указывающее, достаточно ли найденных нод
 // для формирования группы (не меньше MinGroupSize).
-func (er *EntityRegistry) GetNodesWithCapabilityForGoal(goalId string, nodeId string) ([]*entities.Node, []*entities.Node, []*entities.Node, bool) {
+func (er *EntityRegistry) GetNodesWithCapabilityForGoal(goalId string, nodeId string, maxCount int) ([]*entities.Node, []*entities.Node, []*entities.Node, bool) {
 	// Получаем GroupGoal по goalId
 	groupGoal, err := er.GroupGoal.GetEntity(goalId)
 	if err != nil {
@@ -172,8 +178,8 @@ func (er *EntityRegistry) GetNodesWithCapabilityForGoal(goalId string, nodeId st
 		}
 
 		if group.GetGoal() == goalId {
-			for _, participantId := range group.GetParticipants() {
-				groupedNodes[participantId] = true
+			for _, participant := range group.GetParticipants() {
+				groupedNodes[participant.ID] = true
 			}
 		}
 	}
@@ -340,7 +346,7 @@ func (er *EntityRegistry) GetNodesWithCapabilityForGoal(goalId string, nodeId st
 	}
 
 	// Ограничиваем количество возвращаемых нод максимальным размером группы
-	maxGroupSize := groupGoal.GetMaxGroupSize()
+	maxGroupSize := maxCount
 	maxResult := maxGroupSize - 1 // -1 потому что текущая нода тоже в группе
 	if maxResult > len(candidateNodes) {
 		maxResult = len(candidateNodes)
@@ -409,8 +415,8 @@ func (er *EntityRegistry) GetNodeGroupsByGoal(goalID, nodeID string) ([]*entitie
 
 		// Проверяем, есть ли нода среди участников группы
 		isParticipant := false
-		for _, participantID := range group.GetParticipants() {
-			if participantID == nodeID {
+		for _, participant := range group.GetParticipants() {
+			if participant.ID == nodeID {
 				isParticipant = true
 				break
 			}
@@ -428,4 +434,44 @@ func (er *EntityRegistry) GetNodeGroupsByGoal(goalID, nodeID string) ([]*entitie
 		Msg("найдены группы для ноды и цели")
 
 	return result, nil
+}
+
+// HasActiveVoteRequest проверяет наличие активного запроса на голосование с указанными параметрами
+// Возвращает существующий запрос и true, если такой запрос найден, иначе nil и false
+func (er *EntityRegistry) HasActiveVoteRequest(kind entities.VoteKind, target string) (*entities.VoteRequest, bool) {
+	voteRequests, err := er.VoteRequest.GetAllEntities()
+	if err != nil {
+		return nil, false
+	}
+
+	currentTime := time.Now().Unix()
+
+	for _, vr := range voteRequests {
+		// Проверяем, подходит ли запрос по типу и цели
+		if vr.GetKind() == kind && vr.GetTarget() == target {
+			// Проверяем, активен ли запрос
+			if vr.IsActive(currentTime) {
+				return vr, true
+			}
+		}
+	}
+
+	return nil, false
+}
+
+// HasVoteFromNodeForRequest проверяет, голосовала ли уже нода за конкретный запрос
+// Возвращает true, если нода уже голосовала, иначе false
+func (er *EntityRegistry) HasVoteFromNodeForRequest(requestID string, voterID string) bool {
+	votes, err := er.Vote.GetAllEntities()
+	if err != nil {
+		return false
+	}
+
+	for _, vote := range votes {
+		if !vote.IsDeleted() && vote.GetRequestID() == requestID && vote.GetVoter() == voterID {
+			return true
+		}
+	}
+
+	return false
 }

@@ -49,6 +49,10 @@ func (tr *TypedRegistry[T]) GetAllEntities() ([]T, error) {
 	return typedEntities, nil
 }
 
-func (tr *TypedRegistry[T]) StoreEntity(entity T) error {
+func (tr *TypedRegistry[T]) StoreEntity(entity T) (bool, error) {
 	return tr.registry.StoreEntity(tr.entityType, entity)
+}
+
+func (tr *TypedRegistry[T]) DeleteEntity(entityID string) error {
+	return tr.registry.DeleteEntity(tr.entityType, entityID)
 }

@@ -8,6 +8,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"fmt"
+	"github.com/juanfont/headscale/hscontrol/spnetwork/api"
 	"github.com/juanfont/headscale/hscontrol/spnetwork/common"
 	"github.com/juanfont/headscale/hscontrol/spnetwork/common/entities"
 	"math/big"
@@ -22,7 +23,7 @@ import (
 // корректно синхронизируют информацию о узлах сети между собой
 func TestSPNetworkSynchronization(t *testing.T) {
 	// Количество серверов для теста (легко меняется)
-	numServers := 2
+	numServers := 3
 
 	// Создаем временный каталог для сертификатов
 	tempDir, err := os.MkdirTemp("", "spnetwork-test")
@@ -44,33 +45,51 @@ func TestSPNetworkSynchronization(t *testing.T) {
 	// Инициализируем узлы
 	basePort := 9000
 	for i := 0; i < numServers; i++ {
-		node := entities.NewNode(fmt.Sprintf("node-%d", i))
+		node := entities.NewNode()
 		node.SetHost("127.0.0.1")
 		node.SetGossipPort(uint16(basePort + i))
 		node.SetUdpPingPort(uint16(basePort + i + 1000))
 		nodes[i] = node
 	}
 
-	// Запускаем первый сервер (bootstrap сервер)
-	servers[0], err = NewSPNetwork(nodes[0], nil, PkiConfig{
-		CertFile: certFiles[0],
-		KeyFile:  keyFiles[0],
-		CaFile:   caFile,
-	})
-	if err != nil {
-		t.Fatalf("Не удалось создать bootstrap-сервер: %v", err)
-	}
-	err = servers[0].Start()
-	if err != nil {
-		t.Fatalf("Не удалось запустить bootstrap-сервер: %v", err)
-	}
-	defer servers[0].Stop()
+	bootstrapNodes := []*entities.Node{nodes[0]}
+
+	var server *api.Server
 
 	// Запускаем остальные серверы, использующие первый сервер как bootstrap
-	for i := 1; i < numServers; i++ {
-		// В качестве bootstrap узла используем первый сервер
-		bootstrapNodes := []*entities.Node{nodes[0]}
-		servers[i], err = NewSPNetwork(nodes[i], bootstrapNodes, PkiConfig{
+	for i := 0; i < numServers; i++ {
+		registry := common.NewEntityRegistry(common.NewMemoryEntityRegistry())
+		for _, node := range bootstrapNodes {
+			_, err := registry.Node.StoreEntity(node)
+			if err != nil {
+				return
+			}
+		}
+		_, err := registry.Node.StoreEntity(nodes[i])
+		if err != nil {
+			return
+		}
+
+		if i == 0 {
+			consensusGroupGoal := entities.NewGroupGoalWithTimeout(2, 5, 1)
+			consensusGroupGoal.AddDimensionCriterion(entities.DimensionCriterion{
+				Type:      entities.LatencyClass,
+				Condition: entities.ConditionMin,
+				Values:    make([]float64, 0),
+			})
+			_, err := registry.GroupGoal.StoreEntity(consensusGroupGoal)
+			if err != nil {
+				return
+			}
+			server = api.NewServer(registry)
+			go func() {
+				err = server.Start("127.0.0.1:8911")
+				if err != nil {
+					return
+				}
+			}()
+		}
+		servers[i], err = NewSPNetwork(registry, nodes[i], PkiConfig{
 			CertFile: certFiles[i],
 			KeyFile:  keyFiles[i],
 			CaFile:   caFile,
@@ -86,15 +105,45 @@ func TestSPNetworkSynchronization(t *testing.T) {
 	}
 
 	// Ожидаем 10 секунд для синхронизации
-	t.Log("Ожидаем 10 секунд для синхронизации серверов...")
+	t.Log("Ожидаем 60 секунд для синхронизации серверов...")
+	time.Sleep(60 * time.Second)
+
+	// Останавливаем сначала Measurer и Grouping для завершения обработки данных
+	t.Log("Останавливаем Measurer и Grouping для финализации данных...")
+	for i := 0; i < numServers; i++ {
+		err := servers[i].Measurer.Stop()
+		if err != nil {
+			t.Fatalf("Не удалось остановить Measurer на сервере %d: %v", i, err)
+		}
+
+		//err = servers[i].Grouping.Stop()
+		//if err != nil {
+		//	t.Fatalf("Не удалось остановить Grouping на сервере %d: %v", i, err)
+		//}
+
+		err = servers[i].Consensus.Stop()
+		if err != nil {
+			t.Fatalf("Не удалось остановить Consensus на сервере %d: %v", i, err)
+		}
+	}
+
+	// Ожидаем дополнительные 10 секунд для завершения синхронизации после остановки измерений
+	t.Log("Ожидаем еще 10 секунд для финальной синхронизации данных...")
 	time.Sleep(10 * time.Second)
+
+	if server != nil {
+		err := server.Stop()
+		if err != nil {
+			return
+		}
+	}
 
 	// Проверяем, что все серверы имеют одинаковый список сущностей всех типов
 	for i := 0; i < numServers; i++ {
 		for j := i + 1; j < numServers; j++ {
 			// Получаем все сущности из registry для обоих серверов
-			entities1 := servers[i].registry.GetAllEntities()
-			entities2 := servers[j].registry.GetAllEntities()
+			entities1 := servers[i].registry.BaseRegistry.GetAllEntities()
+			entities2 := servers[j].registry.BaseRegistry.GetAllEntities()
 
 			// Проверяем, что оба сервера имеют одинаковое количество типов сущностей
 			if len(entities1) != len(entities2) {
@@ -145,10 +194,115 @@ func TestSPNetworkSynchronization(t *testing.T) {
 	// Проверяем, что каждый сервер знает о всех узлах
 	for i := 0; i < numServers; i++ {
 		// Получаем узлы через типизированный registry для проверки конкретно узлов
-		nodes, _ := servers[i].nodeRegistry.GetAllEntities()
+		nodes, _ := servers[i].registry.Node.GetAllEntities()
 		if len(nodes) != numServers {
 			t.Errorf("Сервер %d знает только о %d узлах из %d",
 				i, len(nodes), numServers)
+		}
+	}
+
+	// Вывод всех сущностей по типам, если тест успешно прошел
+	if !t.Failed() {
+		t.Log("Тест успешно пройден. Вывод всех сущностей по типам:")
+
+		// Используем первый сервер для вывода информации, так как все серверы синхронизированы
+		allEntities := servers[0].registry.BaseRegistry.GetAllEntities()
+
+		for entityType, entities := range allEntities {
+			t.Logf("  Тип сущности: %s, Количество: %d", entityType, len(entities))
+			for _, entity := range entities {
+				t.Logf("    ID: %s", entity.GetID())
+			}
+		}
+
+		// Отдельно выводим содержимое сущностей Group
+		t.Log("Детальная информация о группах:")
+		groups, err := servers[0].registry.Group.GetAllEntities()
+		if err != nil {
+			t.Errorf("Ошибка при получении групп: %v", err)
+		} else {
+			for _, group := range groups {
+				if group.IsDeleted() {
+					t.Logf("  Группа [УДАЛЕНА] ID: %s", group.GetID())
+					continue
+				}
+
+				t.Logf("  Группа ID: %s", group.GetID())
+				t.Logf("    Цель: %s", group.GetGoal())
+				t.Logf("    Версия: %d", group.GetVersion())
+				t.Logf("    Дата создания: %s", time.Unix(group.GetCreationDate(), 0).Format(time.RFC3339))
+
+				participants := group.GetParticipants()
+				t.Logf("    Участники (%d):", len(participants))
+				for _, participant := range participants {
+					joinDate := time.Unix(participant.JoinDateUnix, 0).Format(time.RFC3339)
+					t.Logf("      ID: %s, Присоединился: %s", participant.ID, joinDate)
+				}
+			}
+		}
+
+		// Выводим детальную информацию о Vote
+		t.Log("Детальная информация о голосах (Vote):")
+		votes, err := servers[0].registry.Vote.GetAllEntities()
+		if err != nil {
+			t.Errorf("Ошибка при получении голосов: %v", err)
+		} else {
+			for _, vote := range votes {
+				if vote.IsDeleted() {
+					t.Logf("  Голос [УДАЛЕН] ID: %s", vote.GetID())
+					continue
+				}
+
+				t.Logf("  Голос ID: %s", vote.GetID())
+				t.Logf("    Тип: %s", vote.GetKind())
+				t.Logf("    Цель: %s", vote.GetTarget())
+				t.Logf("    Значение: %d", vote.GetValue())
+				t.Logf("    ID запроса: %s", vote.GetRequestID())
+				t.Logf("    Голосующий: %s", vote.GetVoter())
+				t.Logf("    Версия: %d", vote.GetVersion())
+				t.Logf("    Дата создания: %s", time.Unix(vote.GetDateUnix(), 0).Format(time.RFC3339))
+			}
+		}
+
+		// Выводим детальную информацию о VoteRequest
+		t.Log("Детальная информация о запросах на голосование (VoteRequest):")
+		voteRequests, err := servers[0].registry.VoteRequest.GetAllEntities()
+		if err != nil {
+			t.Errorf("Ошибка при получении запросов на голосование: %v", err)
+		} else {
+			for _, vr := range voteRequests {
+				if vr.IsDeleted() {
+					t.Logf("  Запрос на голосование [УДАЛЕН] ID: %s", vr.GetID())
+					continue
+				}
+
+				t.Logf("  Запрос на голосование ID: %s", vr.GetID())
+				t.Logf("    Тип: %s", vr.GetKind())
+				t.Logf("    Цель: %s", vr.GetTarget())
+				t.Logf("    Таймаут: %d сек", vr.GetTimeoutSecs())
+				t.Logf("    Версия: %d", vr.GetVersion())
+				t.Logf("    Дата создания: %s", time.Unix(vr.GetDateUnix(), 0).Format(time.RFC3339))
+			}
+		}
+
+		// Выводим детальную информацию о LeadershipResign
+		t.Log("Детальная информация об отказах от лидерства (LeadershipResign):")
+		resigns, err := servers[0].registry.LeadershipResign.GetAllEntities()
+		if err != nil {
+			t.Errorf("Ошибка при получении отказов от лидерства: %v", err)
+		} else {
+			for _, resign := range resigns {
+				if resign.IsDeleted() {
+					t.Logf("  Отказ от лидерства [УДАЛЕН] ID: %s", resign.GetID())
+					continue
+				}
+
+				t.Logf("  Отказ от лидерства ID: %s", resign.GetID())
+				t.Logf("    Владелец: %s", resign.GetOwner())
+				t.Logf("    ID запроса на голосование: %s", resign.GetVoteRequestID())
+				t.Logf("    Версия: %d", resign.GetVersion())
+				t.Logf("    Дата создания: %s", time.Unix(resign.GetDateUnix(), 0).Format(time.RFC3339))
+			}
 		}
 	}
 }
