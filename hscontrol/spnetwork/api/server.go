@@ -35,6 +35,9 @@ func (s *Server) setupRouter() {
 	s.registerGroupRoutes(r)
 	s.registerGroupGoalRoutes(r)
 	s.registerMeasurementRoutes(r)
+	s.registerVoteRoutes(r)
+	s.registerVoteRequestRoutes(r)
+	s.registerLeadershipResignRoutes(r)
 
 	s.router = r
 }

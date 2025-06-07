@@ -102,6 +102,14 @@ func (v *Vote) IsDeleted() bool {
 	return v.deleted
 }
 
+// SetDeleted устанавливает статус удаления голоса и увеличивает версию
+func (v *Vote) SetDeleted(deleted bool) {
+	if v.deleted != deleted {
+		v.deleted = deleted
+		v.version++
+	}
+}
+
 // GetVoter возвращает ID ноды, отдавшей голос
 func (v *Vote) GetVoter() string {
 	return v.voter

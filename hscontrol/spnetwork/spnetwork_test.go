@@ -11,6 +11,10 @@ import (
 	"github.com/juanfont/headscale/hscontrol/spnetwork/api"
 	"github.com/juanfont/headscale/hscontrol/spnetwork/common"
 	"github.com/juanfont/headscale/hscontrol/spnetwork/common/entities"
+	"github.com/juanfont/headscale/hscontrol/spnetwork/consensus"
+	"github.com/juanfont/headscale/hscontrol/spnetwork/grouping"
+	"github.com/juanfont/headscale/hscontrol/spnetwork/measurer"
+	g "github.com/juanfont/headscale/hscontrol/spnetwork/syncer/gossip"
 	"math/big"
 	"net"
 	"os"
@@ -23,7 +27,7 @@ import (
 // корректно синхронизируют информацию о узлах сети между собой
 func TestSPNetworkSynchronization(t *testing.T) {
 	// Количество серверов для теста (легко меняется)
-	numServers := 3
+	numServers := 7
 
 	// Создаем временный каталог для сертификатов
 	tempDir, err := os.MkdirTemp("", "spnetwork-test")
@@ -52,12 +56,39 @@ func TestSPNetworkSynchronization(t *testing.T) {
 		nodes[i] = node
 	}
 
-	bootstrapNodes := []*entities.Node{nodes[0]}
+	// Сортируем узлы по ID в обратном порядке
+	sortedIndices := make([]int, numServers)
+	for i := 0; i < numServers; i++ {
+		sortedIndices[i] = i
+	}
+
+	// Сортировка по ID в обратном порядке
+	for i := 0; i < numServers-1; i++ {
+		for j := i + 1; j < numServers; j++ {
+			if nodes[sortedIndices[i]].ID < nodes[sortedIndices[j]].ID {
+				sortedIndices[i], sortedIndices[j] = sortedIndices[j], sortedIndices[i]
+			}
+		}
+	}
+
+	t.Logf("Порядок запуска серверов (в обратном порядке по ID):")
+	for i, idx := range sortedIndices {
+		t.Logf("  %d. Сервер #%d с ID: %s", i+1, idx, nodes[idx].ID)
+	}
+
+	bootstrapNodes := []*entities.Node{nodes[sortedIndices[0]]}
 
 	var server *api.Server
 
-	// Запускаем остальные серверы, использующие первый сервер как bootstrap
-	for i := 0; i < numServers; i++ {
+	// Создаем серверы и запускаем только первую половину сначала
+	half := numServers / 2
+	if numServers%2 != 0 {
+		half++ // Округляем вверх для нечетного числа серверов
+	}
+	blackList := make(map[string]bool)
+
+	// Подготовка всех серверов
+	for x, i := range sortedIndices {
 		registry := common.NewEntityRegistry(common.NewMemoryEntityRegistry())
 		for _, node := range bootstrapNodes {
 			_, err := registry.Node.StoreEntity(node)
@@ -70,8 +101,8 @@ func TestSPNetworkSynchronization(t *testing.T) {
 			return
 		}
 
-		if i == 0 {
-			consensusGroupGoal := entities.NewGroupGoalWithTimeout(2, 5, 1)
+		if x == 0 {
+			consensusGroupGoal := entities.NewGroupGoalWithTimeout(2, 5, 10)
 			consensusGroupGoal.AddDimensionCriterion(entities.DimensionCriterion{
 				Type:      entities.LatencyClass,
 				Condition: entities.ConditionMin,
@@ -89,24 +120,98 @@ func TestSPNetworkSynchronization(t *testing.T) {
 				}
 			}()
 		}
-		servers[i], err = NewSPNetwork(registry, nodes[i], PkiConfig{
+
+		localNode := nodes[i]
+		pkiConfig := PkiConfig{
 			CertFile: certFiles[i],
 			KeyFile:  keyFiles[i],
 			CaFile:   caFile,
-		})
+		}
+		host, _ := localNode.GetHost()
+		port, _ := localNode.GetGossipPort()
+		transportConfig := g.GrpcTransportConfig{
+			ListenHost: host,
+			ListenPort: int(port),
+			EnableTLS:  true,
+			CertFile:   pkiConfig.CertFile,
+			KeyFile:    pkiConfig.KeyFile,
+			CaFile:     pkiConfig.CaFile,
+		}
+		syncerTransport, err := g.NewGrpcTransport(registry, localNode, transportConfig)
+		if err != nil {
+			return
+		}
+		s := g.NewGossip(registry, localNode.ID, syncerTransport, time.Duration(100)*time.Millisecond)
+
+		c, err := consensus.NewDeterministicConsensus(s, registry, localNode, time.Duration(200)*time.Millisecond, 10)
+
+		if err != nil {
+			return
+		}
+
+		//udpPingPort, _ := localNode.GetUdpPingPort()
+		//m, err := measurer.NewUDPPingMeasurerWithDefaults(registry, localNode, host, int(udpPingPort))
+		m, err := measurer.NewMonkeyMeasurer(registry, localNode, measurer.MonkeyMeasurerConfig{
+			MeasureInterval:            time.Duration(5) * time.Second,
+			NewValueProbability:        0.01,
+			NodeUnavailableProbability: 0.01,
+		}, blackList)
+		if err != nil {
+			return
+		}
+
+		g, err := grouping.NewDeterministicGrouping(registry, localNode, c, time.Duration(1)*time.Second)
+		if err != nil {
+			return
+		}
+
+		servers[i], err = NewSPNetworkManaged(registry, nodes[i], s, c, m, g)
 		if err != nil {
 			t.Fatalf("Не удалось создать сервер %d: %v", i, err)
 		}
-		err = servers[i].Start()
-		if err != nil {
-			t.Fatalf("Не удалось запустить сервер %d: %v", i, err)
-		}
-		defer servers[i].Stop()
 	}
 
-	// Ожидаем 10 секунд для синхронизации
-	t.Log("Ожидаем 60 секунд для синхронизации серверов...")
+	// Запускаем первую половину серверов
+	t.Log("Запускаем первую половину серверов...")
+	for i := 0; i < half; i++ {
+		idx := sortedIndices[i]
+		t.Logf("Запуск сервера #%d с ID: %s", idx, nodes[idx].ID)
+		err = servers[idx].Start()
+		if err != nil {
+			t.Fatalf("Не удалось запустить сервер %d: %v", idx, err)
+		}
+		defer servers[idx].Stop()
+	}
+
+	// Ожидаем 60 секунд после запуска первой половины
+	t.Log("Ожидаем 60 секунд после запуска первой половины серверов...")
 	time.Sleep(60 * time.Second)
+
+	// Запускаем вторую половину серверов
+	t.Log("Запускаем вторую половину серверов...")
+	for i := half; i < numServers; i++ {
+		idx := sortedIndices[i]
+		t.Logf("Запуск сервера #%d с ID: %s", idx, nodes[idx].ID)
+		err = servers[idx].Start()
+		if err != nil {
+			t.Fatalf("Не удалось запустить сервер %d: %v", idx, err)
+		}
+		defer servers[idx].Stop()
+	}
+
+	// Ожидаем 60 секунд для синхронизации всех серверов
+	t.Log("Ожидаем 60 секунд для синхронизации всех серверов...")
+	time.Sleep(60 * time.Second)
+
+	t.Log("Добавляем сервера из второй половины в черный список (делаем недоступными)")
+	for i := half; i < numServers; i++ {
+		idx := sortedIndices[i]
+		blackList[nodes[idx].ID] = true
+	}
+
+	// Ожидаем 60 секунд для синхронизации всех серверов
+	t.Log("Ожидаем 600 секунд для синхронизации всех серверов...")
+	time.Sleep(600 * time.Second)
 
 	// Останавливаем сначала Measurer и Grouping для завершения обработки данных
 	t.Log("Останавливаем Measurer и Grouping для финализации данных...")
@@ -207,6 +312,27 @@ func TestSPNetworkSynchronization(t *testing.T) {
 
 		// Используем первый сервер для вывода информации, так как все серверы синхронизированы
 		allEntities := servers[0].registry.BaseRegistry.GetAllEntities()
+
+		// Выводим отдельно список узлов, отсортированных по ID в обратном порядке
+		t.Log("Список узлов (отсортирован по ID в обратном порядке):")
+		nodes, _ := servers[0].registry.Node.GetAllEntities()
+		sortedNodes := make([]*entities.Node, len(nodes))
+		for i, node := range nodes {
+			sortedNodes[i] = node
+		}
+		// Сортировка узлов по ID в обратном порядке
+		for i := 0; i < len(sortedNodes)-1; i++ {
+			for j := i + 1; j < len(sortedNodes); j++ {
+				if sortedNodes[i].ID < sortedNodes[j].ID {
+					sortedNodes[i], sortedNodes[j] = sortedNodes[j], sortedNodes[i]
+				}
+			}
+		}
+		for i, node := range sortedNodes {
+			host, _ := node.GetHost()
+			port, _ := node.GetGossipPort()
+			t.Logf("  %d. ID: %s, Хост: %s, Порт: %d", i+1, node.ID, host, port)
+		}
 
 		for entityType, entities := range allEntities {
 			t.Logf("  Тип сущности: %s, Количество: %d", entityType, len(entities))

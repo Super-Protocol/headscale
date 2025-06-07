@@ -43,6 +43,16 @@ func (n *Node) IsDeleted() bool {
 	return n.deleted
 }
 
+// SetDeleted устанавливает статус удаления ноды и увеличивает версию
+func (n *Node) SetDeleted(deleted bool) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.deleted != deleted {
+		n.deleted = deleted
+		n.version++
+	}
+}
+
 func (n *Node) GetHash() []byte {
 	n.mu.RLock()
 	defer n.mu.RUnlock()

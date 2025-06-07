@@ -174,6 +174,16 @@ func (g *Group) MarkDeleted() {
 	g.Version++
 }
 
+// SetDeleted устанавливает статус удаления группы и увеличивает версию
+func (g *Group) SetDeleted(deleted bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.Deleted != deleted {
+		g.Deleted = deleted
+		g.Version++
+	}
+}
+
 // GroupFromProto создает Group из protobuf сообщения
 func GroupFromProto(p *p.Group) *Group {
 	participants := make([]Participant, len(p.Participants))

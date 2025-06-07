@@ -8,9 +8,7 @@ import (
 	"github.com/juanfont/headscale/hscontrol/spnetwork/grouping"
 	"github.com/juanfont/headscale/hscontrol/spnetwork/measurer"
 	"github.com/juanfont/headscale/hscontrol/spnetwork/syncer"
-	g "github.com/juanfont/headscale/hscontrol/spnetwork/syncer/gossip"
 	"sync"
-	"time"
 )
 
 type SPNetwork struct {
@@ -30,51 +28,19 @@ type PkiConfig struct {
 	CaFile   string
 }
 
-func NewSPNetwork(registry *common.EntityRegistry, localNode *entities.Node, pkiConfig PkiConfig) (*SPNetwork, error) {
-	host, _ := localNode.GetHost()
-	port, _ := localNode.GetGossipPort()
-	transportConfig := g.GrpcTransportConfig{
-		ListenHost: host,
-		ListenPort: int(port),
-		EnableTLS:  true,
-		CertFile:   pkiConfig.CertFile,
-		KeyFile:    pkiConfig.KeyFile,
-		CaFile:     pkiConfig.CaFile,
-	}
-	syncerTransport, err := g.NewGrpcTransport(registry, localNode, transportConfig)
-	if err != nil {
-		return nil, err
-	}
-	s := g.NewGossip(registry, localNode.ID, syncerTransport, time.Duration(100)*time.Millisecond)
-
-	c, err := consensus.NewDeterministicConsensus(s, registry, localNode, time.Duration(200)*time.Millisecond)
-
-	if err != nil {
-		return nil, err
-	}
-
-	//udpPingPort, _ := localNode.GetUdpPingPort()
-	//m, err := measurer.NewUDPPingMeasurerWithDefaults(registry, localNode, host, int(udpPingPort))
-	m, err := measurer.NewMonkeyMeasurer(registry, localNode, measurer.MonkeyMeasurerConfig{
-		MeasureInterval:            time.Duration(500) * time.Millisecond,
-		NewValueProbability:        0.05,
-		NodeUnavailableProbability: 0.01,
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	grouping, err := grouping.NewDeterministicGrouping(registry, localNode, time.Duration(1)*time.Second)
-	if err != nil {
-		return nil, err
-	}
+func NewSPNetworkManaged(registry *common.EntityRegistry,
+	localNode *entities.Node,
+	syncer syncer.Syncer,
+	consensus consensus.Consensus,
+	measurer measurer.Measurer,
+	grouping grouping.Grouping) (*SPNetwork, error) {
 
 	n := &SPNetwork{
 		LocalNode: localNode,
-		Syncer:    s,
-		Measurer:  m,
+		Syncer:    syncer,
+		Measurer:  measurer,
 		Grouping:  grouping,
-		Consensus: c,
+		Consensus: consensus,
 		registry:  registry,
 	}
 	return n, nil
@@ -105,10 +71,10 @@ func (n *SPNetwork) Start() error {
 		return err
 	}
 
-	//err = n.Grouping.Start()
-	//if err != nil {
-	//	return err
-	//}
+	err = n.Grouping.Start()
+	if err != nil {
+		return err
+	}
 
 	return nil
 }
@@ -121,15 +87,15 @@ func (n *SPNetwork) Stop() error {
 		return fmt.Errorf("network is already stopped")
 	}
 
-	err := n.Consensus.Stop()
+	err := n.Grouping.Stop()
 	if err != nil {
 		return err
 	}
 
-	//err := n.Grouping.Stop()
-	//if err != nil {
-	//	return err
-	//}
+	err = n.Consensus.Stop()
+	if err != nil {
+		return err
+	}
 
 	err = n.Measurer.Stop()
 	if err != nil {

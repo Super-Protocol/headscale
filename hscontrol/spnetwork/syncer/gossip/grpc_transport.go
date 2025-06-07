@@ -844,6 +844,7 @@ func (t *GrpcTransport) Sync(targetNode *entities.Node) error {
 						Msg("error deserializing group entity")
 					continue
 				}
+
 				if saved, err := t.entityRegistry.Group.StoreEntity(group); err != nil {
 					log.Error().
 						Err(err).

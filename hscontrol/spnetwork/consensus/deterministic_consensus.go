@@ -14,15 +14,16 @@ import (
 // DeterministicConsensus реализует механизм консенсуса на основе детерминированного
 // определения лидера сети с подтверждением через голосование.
 type DeterministicConsensus struct {
-	syncer           syncer.Syncer
-	registry         *common.EntityRegistry
-	localNode        *entities.Node
-	syncInterval     time.Duration
-	isLeader         bool
-	mu               sync.RWMutex
-	running          bool
-	stopChan         chan struct{}
-	consensusRunning bool
+	syncer                 syncer.Syncer
+	registry               *common.EntityRegistry
+	localNode              *entities.Node
+	syncInterval           time.Duration
+	leaderAliveTimeoutSecs int64
+	isLeader               bool
+	mu                     sync.RWMutex
+	running                bool
+	stopChan               chan struct{}
+	consensusRunning       bool
 }
 
 // NewDeterministicConsensus создает новый экземпляр DeterministicConsensus
@@ -31,15 +32,17 @@ func NewDeterministicConsensus(
 	registry *common.EntityRegistry,
 	localNode *entities.Node,
 	syncInterval time.Duration,
+	leaderAliveTimeoutSecs int64,
 ) (*DeterministicConsensus, error) {
 	return &DeterministicConsensus{
-		syncer:           syncer,
-		registry:         registry,
-		localNode:        localNode,
-		syncInterval:     syncInterval,
-		isLeader:         false,
-		stopChan:         make(chan struct{}),
-		consensusRunning: false,
+		syncer:                 syncer,
+		registry:               registry,
+		localNode:              localNode,
+		syncInterval:           syncInterval,
+		leaderAliveTimeoutSecs: leaderAliveTimeoutSecs,
+		isLeader:               false,
+		stopChan:               make(chan struct{}),
+		consensusRunning:       false,
 	}, nil
 }
 
@@ -91,7 +94,18 @@ func (dc *DeterministicConsensus) Stop() error {
 func (dc *DeterministicConsensus) IsLeader() bool {
 	dc.mu.RLock()
 	defer dc.mu.RUnlock()
-	return dc.isLeader
+	currentLeader, _, err := dc.determineCurrentLeader()
+	if err != nil {
+		log.Error().
+			Err(err).
+			Str("node_id", dc.localNode.GetID()).
+			Msg("error determining current leader")
+		return false
+	}
+	if currentLeader == nil {
+		return false
+	}
+	return currentLeader.GetID() == dc.localNode.GetID()
 }
 
 // setLeaderState устанавливает статус лидерства для ноды
@@ -146,6 +160,7 @@ func (dc *DeterministicConsensus) runConsensusIfNotRunning() error {
 				Str("node_id", dc.localNode.GetID()).
 				Float32("sync_coef", syncCoef).
 				Msg("skipping consensus process due to low sync coefficient")
+			dc.setLeaderState(false)
 			return
 		}
 
@@ -157,6 +172,10 @@ func (dc *DeterministicConsensus) runConsensusIfNotRunning() error {
 				Str("node_id", dc.localNode.GetID()).
 				Msg("error determining current leader")
 			return
+		}
+
+		if currentLeader != nil && currentLeader.GetID() == dc.localNode.GetID() {
+			dc.setLeaderState(true)
 		}
 
 		// Определяем детерминистически кто должен быть лидером (нода с наименьшим ID)
@@ -173,12 +192,17 @@ func (dc *DeterministicConsensus) runConsensusIfNotRunning() error {
 		if shouldBeLeader != nil && shouldBeLeader.GetID() == dc.localNode.GetID() {
 			// Если мы не являемся текущим лидером, инициируем голосование
 			if currentLeader == nil || currentLeader.GetID() != dc.localNode.GetID() {
-				err = dc.initiateLeadershipVote()
-				if err != nil {
-					log.Error().
-						Err(err).
-						Str("node_id", dc.localNode.GetID()).
-						Msg("error initiating leadership vote")
+				voteRequest, hasActive := dc.registry.HasActiveVoteRequest(entities.VoteKindNetworkLeadership, dc.localNode.GetID())
+				if !hasActive {
+					err = dc.initiateLeadershipVote()
+					if err != nil {
+						log.Error().
+							Err(err).
+							Str("node_id", dc.localNode.GetID()).
+							Msg("error initiating leadership vote")
+					}
+				} else {
+					dc.checkQuorumReached(voteRequest)
 				}
 			} else {
 				// Мы уже лидер
@@ -213,22 +237,24 @@ func (dc *DeterministicConsensus) runConsensusIfNotRunning() error {
 			for _, newVoteRequest := range newerVoteRequests {
 				if newVoteRequest.GetTarget() != dc.localNode.GetID() {
 					// Если есть более новое голосование за другую ноду, слагаем полномочия
-					resign := entities.NewLeadershipResign(dc.localNode.GetID(), voteRequest.GetID())
-					_, err = dc.registry.LeadershipResign.StoreEntity(resign)
-					if err != nil {
-						log.Error().
-							Err(err).
-							Str("node_id", dc.localNode.GetID()).
-							Str("vote_request_id", voteRequest.GetID()).
-							Msg("error storing leadership resign")
-					} else {
-						log.Info().
-							Str("node_id", dc.localNode.GetID()).
-							Str("vote_request_id", voteRequest.GetID()).
-							Str("new_leader", newVoteRequest.GetTarget()).
-							Msg("resigned from leadership due to newer vote")
+					if !dc.registry.HasLeadershipResign(voteRequest.GetID()) {
+						resign := entities.NewLeadershipResign(dc.localNode.GetID(), voteRequest.GetID())
+						_, err = dc.registry.LeadershipResign.StoreEntity(resign)
+						if err != nil {
+							log.Error().
+								Err(err).
+								Str("node_id", dc.localNode.GetID()).
+								Str("vote_request_id", voteRequest.GetID()).
+								Msg("error storing leadership resign")
+						} else {
+							log.Info().
+								Str("node_id", dc.localNode.GetID()).
+								Str("vote_request_id", voteRequest.GetID()).
+								Str("new_leader", newVoteRequest.GetTarget()).
+								Msg("resigned from leadership due to newer vote")
 
-						dc.setLeaderState(false)
+							dc.setLeaderState(false)
+						}
 					}
 					break
 				}
@@ -239,7 +265,7 @@ func (dc *DeterministicConsensus) runConsensusIfNotRunning() error {
 	return nil
 }
 
-// determineCurrentLeader определяет текущего лидера сети на основе голосований
+// determineCurrentLeader определяет текущего лидера сети на основе флага достижения кворума
 func (dc *DeterministicConsensus) determineCurrentLeader() (*entities.Node, *entities.VoteRequest, error) {
 	// Получаем все запросы на голосование
 	voteRequests, err := dc.registry.VoteRequest.GetAllEntities()
@@ -260,44 +286,10 @@ func (dc *DeterministicConsensus) determineCurrentLeader() (*entities.Node, *ent
 		return leadershipVoteRequests[i].GetDateUnix() > leadershipVoteRequests[j].GetDateUnix()
 	})
 
-	// Получаем все голоса
-	votes, err := dc.registry.Vote.GetAllEntities()
-	if err != nil {
-		return nil, nil, fmt.Errorf("error getting votes: %w", err)
-	}
-
-	// Получаем все ноды
-	nodes, err := dc.registry.Node.GetAllEntities()
-	if err != nil {
-		return nil, nil, fmt.Errorf("error getting nodes: %w", err)
-	}
-
-	// Подсчитываем активные ноды
-	activeNodes := 0
-	for _, node := range nodes {
-		if !node.IsDeleted() {
-			activeNodes++
-		}
-	}
-
 	// Проверяем все запросы на голосование, начиная с самых новых
 	for _, voteRequest := range leadershipVoteRequests {
-		// Проверяем, не истек ли таймаут голосования
-		if time.Now().Unix() > voteRequest.GetDateUnix()+voteRequest.GetTimeoutSecs() {
-			continue // Голосование устарело
-		}
-
-		// Подсчитываем голоса за этот запрос
-		votesCount := 0
-		for _, vote := range votes {
-			if vote.GetRequestID() == voteRequest.GetID() && !vote.IsDeleted() {
-				votesCount++
-			}
-		}
-
-		// Проверяем, есть ли кворум (2/3 от общего числа нод)
-		requiredVotes := int(float64(activeNodes) * 2.0 / 3.0)
-		if votesCount >= requiredVotes {
+		// Проверяем флаг достижения кворума
+		if voteRequest.IsQuorumReached() {
 			// Проверяем, есть ли resignations для предыдущего лидера
 			// или если таймаут предыдущего лидера истек
 			targetNode, err := dc.registry.Node.GetEntity(voteRequest.GetTarget())
@@ -314,7 +306,7 @@ func (dc *DeterministicConsensus) determineCurrentLeader() (*entities.Node, *ent
 			}
 
 			// Проверяем resignation для предыдущего лидера, если он был
-			previousLeader, _, err := dc.findPreviousLeader(voteRequest)
+			previousLeader, previousVoteRequest, err := dc.findPreviousLeader(voteRequest)
 			if err != nil {
 				log.Error().
 					Err(err).
@@ -325,15 +317,12 @@ func (dc *DeterministicConsensus) determineCurrentLeader() (*entities.Node, *ent
 
 			if previousLeader != nil {
 				// Проверяем, есть ли resignation от предыдущего лидера
-				hasResigned := dc.hasLeaderResigned(previousLeader.GetID(), voteRequest.GetID())
+				hasResigned := dc.hasLeaderResigned(previousLeader.GetID(), previousVoteRequest.GetID())
 
 				// Или истек ли таймаут предыдущего лидера
 				timeoutExpired := false
 				if previousLeader != nil {
-					prevVoteRequest, err := dc.findVoteRequestForLeader(previousLeader.GetID())
-					if err == nil && prevVoteRequest != nil {
-						timeoutExpired = time.Now().Unix() > prevVoteRequest.GetDateUnix()+prevVoteRequest.GetTimeoutSecs()
-					}
+					timeoutExpired = !dc.registry.IsNodeAlive(previousLeader.GetID(), voteRequest.GetTimeoutSecs())
 				}
 
 				if !hasResigned && !timeoutExpired {
@@ -376,39 +365,10 @@ func (dc *DeterministicConsensus) findPreviousLeader(currentVoteRequest *entitie
 		return leadershipVoteRequests[i].GetDateUnix() > leadershipVoteRequests[j].GetDateUnix()
 	})
 
-	// Получаем все голоса
-	votes, err := dc.registry.Vote.GetAllEntities()
-	if err != nil {
-		return nil, nil, fmt.Errorf("error getting votes: %w", err)
-	}
-
-	// Получаем все ноды
-	nodes, err := dc.registry.Node.GetAllEntities()
-	if err != nil {
-		return nil, nil, fmt.Errorf("error getting nodes: %w", err)
-	}
-
-	// Подсчитываем активные ноды
-	activeNodes := 0
-	for _, node := range nodes {
-		if !node.IsDeleted() {
-			activeNodes++
-		}
-	}
-
 	// Проверяем все запросы на голосование, начиная с самых новых
 	for _, voteRequest := range leadershipVoteRequests {
-		// Подсчитываем голоса за этот запрос
-		votesCount := 0
-		for _, vote := range votes {
-			if vote.GetRequestID() == voteRequest.GetID() && !vote.IsDeleted() {
-				votesCount++
-			}
-		}
-
-		// Проверяем, есть ли кворум (2/3 от общего числа нод)
-		requiredVotes := int(float64(activeNodes) * 2.0 / 3.0)
-		if votesCount >= requiredVotes {
+		// Проверяем флаг достижения кворума
+		if voteRequest.IsQuorumReached() {
 			targetNode, err := dc.registry.Node.GetEntity(voteRequest.GetTarget())
 			if err != nil {
 				log.Error().
@@ -539,10 +499,15 @@ func (dc *DeterministicConsensus) determineShouldBeLeader() (*entities.Node, err
 		return nil, nil
 	}
 
-	// Находим ноду с наименьшим ID
+	// Находим ноду с наименьшим ID среди доступных нод
 	var shouldBeLeader *entities.Node
 	for _, node := range nodes {
 		if node.IsDeleted() {
+			continue
+		}
+
+		// Проверяем, что нода доступна (жива)
+		if !dc.registry.IsNodeAlive(node.GetID(), dc.leaderAliveTimeoutSecs) {
 			continue
 		}
 
@@ -566,6 +531,8 @@ func (dc *DeterministicConsensus) initiateLeadershipVote() error {
 			Str("request_id", existingRequest.GetID()).
 			Msg("active vote request already exists, skipping creation of new request")
 
+		// Проверяем кворум для существующего запроса
+		dc.checkQuorumReached(existingRequest)
 		return nil
 	}
 
@@ -585,16 +552,13 @@ func (dc *DeterministicConsensus) initiateLeadershipVote() error {
 		return fmt.Errorf("error storing self vote: %w", err)
 	}
 
-	// Сохраняем голос
-	_, err = dc.registry.Vote.StoreEntity(vote)
-	if err != nil {
-		return fmt.Errorf("error storing vote: %w", err)
-	}
-
 	log.Info().
 		Str("node_id", dc.localNode.GetID()).
 		Str("vote_request_id", voteRequest.GetID()).
 		Msg("initiated leadership vote")
+
+	// Проверяем кворум для нового запроса
+	dc.checkQuorumReached(voteRequest)
 
 	return nil
 }
@@ -653,16 +617,9 @@ func (dc *DeterministicConsensus) checkAndVoteForLeadership(shouldBeLeader *enti
 		}
 	}
 
-	now := time.Now().Unix()
-
 	// Проверяем все запросы на голосование
 	for _, voteRequest := range voteRequests {
 		if voteRequest.GetKind() != entities.VoteKindNetworkLeadership || voteRequest.IsDeleted() {
-			continue
-		}
-
-		// Проверяем, не истек ли таймаут голосования
-		if now > voteRequest.GetDateUnix()+voteRequest.GetTimeoutSecs() {
 			continue
 		}
 
@@ -691,7 +648,80 @@ func (dc *DeterministicConsensus) checkAndVoteForLeadership(shouldBeLeader *enti
 				Str("target_id", voteRequest.GetTarget()).
 				Msg("voted for leadership")
 		}
+
+		// Если мы являемся целью голосования (target), проверяем достижение кворума
+		if voteRequest.GetTarget() == dc.localNode.GetID() {
+			dc.checkQuorumReached(voteRequest)
+		}
 	}
 
 	return nil
+}
+
+// checkQuorumReached проверяет достижение кворума и устанавливает флаг, если кворум достигнут
+func (dc *DeterministicConsensus) checkQuorumReached(voteRequest *entities.VoteRequest) {
+	// Если кворум уже достигнут, ничего не делаем
+	if voteRequest.IsQuorumReached() {
+		return
+	}
+
+	// Получаем все голоса
+	votes, err := dc.registry.Vote.GetAllEntities()
+	if err != nil {
+		log.Error().
+			Err(err).
+			Str("vote_request_id", voteRequest.GetID()).
+			Msg("error getting votes for quorum check")
+		return
+	}
+
+	// Получаем все ноды
+	nodes, err := dc.registry.Node.GetAllEntities()
+	if err != nil {
+		log.Error().
+			Err(err).
+			Str("vote_request_id", voteRequest.GetID()).
+			Msg("error getting nodes for quorum check")
+		return
+	}
+
+	// Подсчитываем активные ноды
+	activeNodes := 0
+	for _, node := range nodes {
+		if !node.IsDeleted() && dc.registry.IsNodeAlive(node.GetID(), dc.leaderAliveTimeoutSecs) {
+			activeNodes++
+		}
+	}
+
+	// Подсчитываем голоса за этот запрос
+	votesCount := 0
+	for _, vote := range votes {
+		if vote.GetRequestID() == voteRequest.GetID() && !vote.IsDeleted() {
+			votesCount++
+		}
+	}
+
+	// Проверяем, есть ли кворум (2/3 от общего числа нод)
+	requiredVotes := int(float64(activeNodes) * 2.0 / 3.0)
+	if votesCount >= requiredVotes {
+		// Устанавливаем флаг достижения кворума
+		voteRequest.SetQuorumReached(true)
+
+		// Сохраняем изменения в реестре
+		_, err := dc.registry.VoteRequest.StoreEntity(voteRequest)
+		if err != nil {
+			log.Error().
+				Err(err).
+				Str("vote_request_id", voteRequest.GetID()).
+				Msg("error updating vote request with quorum reached flag")
+			return
+		}
+
+		log.Info().
+			Str("node_id", dc.localNode.GetID()).
+			Str("vote_request_id", voteRequest.GetID()).
+			Int("votes_count", votesCount).
+			Int("required_votes", requiredVotes).
+			Msg("quorum reached and flag set")
+	}
 }

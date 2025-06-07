@@ -93,6 +93,7 @@ func (er *EntityRegistry) IsNodeAlive(nodeID string, timeoutSecs int64) bool {
 	log.Debug().
 		Str("node_id", nodeID).
 		Int64("timeout_secs", timeoutSecs).
+		Dur("time_since_seen", time.Since(lastSeenTime)).
 		Time("last_seen", lastSeenTime).
 		Bool("is_alive", isAlive).
 		Msg("node alive status checked")
@@ -149,6 +150,11 @@ func (er *EntityRegistry) GetNodesWithCapabilityForGoal(goalId string, nodeId st
 			Msg("error getting all nodes")
 		return nil, nil, nil, false
 	}
+
+	// Сортируем ноды по идентификатору для обеспечения стабильного порядка
+	sort.Slice(allNodes, func(i, j int) bool {
+		return allNodes[i].GetID() < allNodes[j].GetID()
+	})
 
 	// Критерии для фильтрации нод
 	criteria := groupGoal.GetDimensionCriteria()
@@ -207,8 +213,16 @@ func (er *EntityRegistry) GetNodesWithCapabilityForGoal(goalId string, nodeId st
 
 	// Итерируемся по всем нодам, исключая исходную и удаленные
 	for _, candidateNode := range allNodes {
-		// Пропускаем текущую ноду
-		if candidateNode.GetID() == nodeId || candidateNode.IsDeleted() {
+		// Текущую ноду добавляем сразу
+		if candidateNode.GetID() == nodeId {
+			candidateNodes = append(candidateNodes, nodeWithScore{
+				node:  candidateNode,
+				score: math.MaxFloat64, // Максимальный приоритет для текущей ноды
+			})
+			continue
+		}
+		// Пропускаем те удаленные
+		if candidateNode.IsDeleted() || !er.IsNodeAlive(candidateNode.GetID(), groupGoal.InactivityTimeout) {
 			continue
 		}
 
@@ -347,7 +361,7 @@ func (er *EntityRegistry) GetNodesWithCapabilityForGoal(goalId string, nodeId st
 
 	// Ограничиваем количество возвращаемых нод максимальным размером группы
 	maxGroupSize := maxCount
-	maxResult := maxGroupSize - 1 // -1 потому что текущая нода тоже в группе
+	maxResult := maxGroupSize
 	if maxResult > len(candidateNodes) {
 		maxResult = len(candidateNodes)
 	}
@@ -385,15 +399,13 @@ func (er *EntityRegistry) GetNodesWithCapabilityForGoal(goalId string, nodeId st
 	return allSuitableNodes, groupedSuitableNodes, nonGroupedSuitableNodes, true
 }
 
-// GetNodeGroupsByGoal возвращает список групп, у которых цель соответствует переданному goalID
-// и в участниках которых есть указанная нода с nodeID.
-func (er *EntityRegistry) GetNodeGroupsByGoal(goalID, nodeID string) ([]*entities.Group, error) {
+// GetGroupsByGoal возвращает список групп, у которых цель соответствует переданному goalID.
+func (er *EntityRegistry) GetGroupsByGoal(goalID string) ([]*entities.Group, error) {
 	// Получаем все группы
 	groups, err := er.Group.GetAllEntities()
 	if err != nil {
 		log.Error().
 			Err(err).
-			Str("node_id", nodeID).
 			Str("goal_id", goalID).
 			Msg("ошибка при получении всех групп")
 		return nil, fmt.Errorf("ошибка при получении всех групп: %w", err)
@@ -413,6 +425,35 @@ func (er *EntityRegistry) GetNodeGroupsByGoal(goalID, nodeID string) ([]*entitie
 			continue
 		}
 
+		result = append(result, group)
+	}
+
+	log.Debug().
+		Str("goal_id", goalID).
+		Int("found_groups", len(result)).
+		Msg("найдены группы для цели")
+
+	return result, nil
+}
+
+// GetNodeGroupsByGoal возвращает список групп, у которых цель соответствует переданному goalID
+// и в участниках которых есть указанная нода с nodeID.
+func (er *EntityRegistry) GetNodeGroupsByGoal(goalID, nodeID string) ([]*entities.Group, error) {
+	// Получаем все группы по цели
+	groups, err := er.GetGroupsByGoal(goalID)
+	if err != nil {
+		log.Error().
+			Err(err).
+			Str("node_id", nodeID).
+			Str("goal_id", goalID).
+			Msg("ошибка при получении групп по цели")
+		return nil, err
+	}
+
+	var result []*entities.Group
+
+	// Фильтруем группы по наличию ноды среди участников
+	for _, group := range groups {
 		// Проверяем, есть ли нода среди участников группы
 		isParticipant := false
 		for _, participant := range group.GetParticipants() {
@@ -436,8 +477,26 @@ func (er *EntityRegistry) GetNodeGroupsByGoal(goalID, nodeID string) ([]*entitie
 	return result, nil
 }
 
+// HasLeadershipResign проверяет, существует ли уже отказ от лидерства для указанного запроса на голосование
+// Возвращает true, если отказ от лидерства существует, иначе false
+func (er *EntityRegistry) HasLeadershipResign(voteRequestId string) bool {
+	resigns, err := er.LeadershipResign.GetAllEntities()
+	if err != nil {
+		return false
+	}
+
+	for _, resign := range resigns {
+		if !resign.IsDeleted() && resign.GetVoteRequestID() == voteRequestId {
+			return true
+		}
+	}
+
+	return false
+}
+
 // HasActiveVoteRequest проверяет наличие активного запроса на голосование с указанными параметрами
 // Возвращает существующий запрос и true, если такой запрос найден, иначе nil и false
+// Активным считается запрос, у которого не достигнут кворум и не истек таймаут
 func (er *EntityRegistry) HasActiveVoteRequest(kind entities.VoteKind, target string) (*entities.VoteRequest, bool) {
 	voteRequests, err := er.VoteRequest.GetAllEntities()
 	if err != nil {
@@ -446,17 +505,27 @@ func (er *EntityRegistry) HasActiveVoteRequest(kind entities.VoteKind, target st
 
 	currentTime := time.Now().Unix()
 
+	// Фильтруем подходящие запросы на голосование
+	var filteredRequests []*entities.VoteRequest
 	for _, vr := range voteRequests {
-		// Проверяем, подходит ли запрос по типу и цели
-		if vr.GetKind() == kind && vr.GetTarget() == target {
-			// Проверяем, активен ли запрос
-			if vr.IsActive(currentTime) {
-				return vr, true
-			}
+		if vr.GetKind() == kind &&
+			vr.GetTarget() == target &&
+			!vr.IsDeleted() {
+			filteredRequests = append(filteredRequests, vr)
 		}
 	}
 
-	return nil, false
+	if len(filteredRequests) == 0 {
+		return nil, false
+	}
+
+	// Сортируем по времени создания в обратном порядке (самые новые в начале)
+	sort.Slice(filteredRequests, func(i, j int) bool {
+		return filteredRequests[i].GetDateUnix() > filteredRequests[j].GetDateUnix()
+	})
+
+	req := filteredRequests[0]
+	return req, req.IsActive(currentTime) && !req.IsQuorumReached()
 }
 
 // HasVoteFromNodeForRequest проверяет, голосовала ли уже нода за конкретный запрос
@@ -474,4 +543,185 @@ func (er *EntityRegistry) HasVoteFromNodeForRequest(requestID string, voterID st
 	}
 
 	return false
+}
+
+// GetNonGroupedNodesForGoal возвращает список нод, которые еще не входят ни в одну группу
+// для указанной цели группировки.
+func (er *EntityRegistry) GetNonGroupedNodesForGoal(goalID string) ([]*entities.Node, error) {
+	// Получаем все активные ноды
+	allNodes, err := er.Node.GetAllEntities()
+	if err != nil {
+		log.Error().
+			Err(err).
+			Str("goal_id", goalID).
+			Msg("ошибка при получении всех нод")
+		return nil, fmt.Errorf("ошибка при получении всех нод: %w", err)
+	}
+
+	// Получаем все группы для данной цели
+	// Метод GetGroupsByGoal уже отфильтровывает удаленные группы
+	groupsByGoal, err := er.GetGroupsByGoal(goalID)
+	if err != nil {
+		log.Error().
+			Err(err).
+			Str("goal_id", goalID).
+			Msg("ошибка при получении групп по цели")
+		return nil, fmt.Errorf("ошибка при получении групп по цели: %w", err)
+	}
+
+	// Создаем мапу нод, которые уже в группах с данной целью
+	nodesInGroups := make(map[string]bool)
+	for _, group := range groupsByGoal {
+		// Дополнительная проверка, хотя GetGroupsByGoal уже отфильтровывает удаленные группы
+		if group.IsDeleted() {
+			continue
+		}
+		for _, participant := range group.GetParticipants() {
+			nodesInGroups[participant.ID] = true
+		}
+	}
+
+	// Фильтруем ноды, которые еще не в группах и не удалены
+	var nonGroupedNodes []*entities.Node
+	for _, node := range allNodes {
+		if !node.IsDeleted() && !nodesInGroups[node.GetID()] {
+			nonGroupedNodes = append(nonGroupedNodes, node)
+		}
+	}
+
+	log.Debug().
+		Str("goal_id", goalID).
+		Int("all_nodes", len(allNodes)).
+		Int("non_grouped_nodes", len(nonGroupedNodes)).
+		Msg("найдены ноды, не входящие в группы с данной целью")
+
+	return nonGroupedNodes, nil
+}
+
+// GetCommonNodesWithCapabilityForGoal возвращает пересечение результатов вызова GetNodesWithCapabilityForGoal
+// для каждой ноды из переданного списка nodeIDs.
+// Возвращает кортеж, содержащий:
+// 1. Подходящие ноды, которые удовлетворяют всем заданным нодам из списка
+// 2. Список нод в группах с данной целью
+// 3. Список нод, не входящих в группы с данной целью
+// А также булево значение, указывающее, достаточно ли найденных нод
+func (er *EntityRegistry) GetCommonNodesWithCapabilityForGoal(goalID string, nodeIDs []string, maxCount int) ([]*entities.Node, []*entities.Node, []*entities.Node, bool) {
+	if len(nodeIDs) == 0 {
+		log.Error().
+			Str("goal_id", goalID).
+			Msg("пустой список nodeIDs")
+		return nil, nil, nil, false
+	}
+
+	// Если передана только одна нода, просто вызываем существующий метод
+	if len(nodeIDs) == 1 {
+		return er.GetNodesWithCapabilityForGoal(goalID, nodeIDs[0], maxCount)
+	}
+
+	// Создаем мапу для хранения счетчиков для каждой ноды
+	// Ключ - ID ноды, значение - количество раз, когда нода подходит для группировки
+	nodeCounters := make(map[string]int)
+
+	// Создаем мапы для отслеживания нод, которые находятся в группах и которые не в группах
+	inGroupNodes := make(map[string]bool)
+	notInGroupNodes := make(map[string]bool)
+
+	// Получаем все ноды, удовлетворяющие критериям для каждой ноды из списка
+	for _, nodeID := range nodeIDs {
+		allSuitableNodes, groupedNodes, nonGroupedNodes, success := er.GetNodesWithCapabilityForGoal(goalID, nodeID, maxCount)
+
+		if !success {
+			log.Error().
+				Str("goal_id", goalID).
+				Str("node_id", nodeID).
+				Msg("не удалось получить подходящие ноды")
+			continue
+		}
+
+		// Увеличиваем счетчик для каждой подходящей ноды
+		for _, node := range allSuitableNodes {
+			nodeCounters[node.GetID()]++
+		}
+
+		// Отмечаем ноды, которые находятся в группах
+		for _, node := range groupedNodes {
+			inGroupNodes[node.GetID()] = true
+		}
+
+		// Отмечаем ноды, которые не находятся в группах
+		for _, node := range nonGroupedNodes {
+			notInGroupNodes[node.GetID()] = true
+		}
+	}
+
+	// Получаем все ноды для формирования результата
+	allNodes, err := er.Node.GetAllEntities()
+	if err != nil {
+		log.Error().
+			Err(err).
+			Msg("ошибка при получении всех нод")
+		return nil, nil, nil, false
+	}
+
+	// Формируем результаты
+	var commonSuitableNodes []*entities.Node
+	var commonGroupedNodes []*entities.Node
+	var commonNonGroupedNodes []*entities.Node
+
+	// Находим ноды, которые подходят для всех нод из списка (их счетчик равен длине списка)
+	targetCount := len(nodeIDs)
+	for _, node := range allNodes {
+		if node.IsDeleted() {
+			continue
+		}
+
+		// Проверяем, подходит ли нода для всех исходных нод
+		count, exists := nodeCounters[node.GetID()]
+		if exists && count == targetCount {
+			commonSuitableNodes = append(commonSuitableNodes, node)
+
+			// Распределяем по спискам в группах/не в группах
+			if inGroupNodes[node.GetID()] {
+				commonGroupedNodes = append(commonGroupedNodes, node)
+			}
+			if notInGroupNodes[node.GetID()] {
+				commonNonGroupedNodes = append(commonNonGroupedNodes, node)
+			}
+		}
+	}
+
+	// Ограничиваем количество результатов
+	if len(commonSuitableNodes) > maxCount {
+		commonSuitableNodes = commonSuitableNodes[:maxCount]
+	}
+	if len(commonGroupedNodes) > maxCount {
+		commonGroupedNodes = commonGroupedNodes[:maxCount]
+	}
+	if len(commonNonGroupedNodes) > maxCount {
+		commonNonGroupedNodes = commonNonGroupedNodes[:maxCount]
+	}
+
+	// Получаем GroupGoal по goalId для проверки минимального размера группы
+	groupGoal, err := er.GroupGoal.GetEntity(goalID)
+	if err != nil {
+		log.Error().
+			Err(err).
+			Str("goal_id", goalID).
+			Msg("ошибка при получении group goal")
+		return commonSuitableNodes, commonGroupedNodes, commonNonGroupedNodes, false
+	}
+
+	minGroupSize := groupGoal.GetMinGroupSize()
+	hasEnoughNodes := len(commonSuitableNodes) >= (minGroupSize - len(nodeIDs))
+
+	log.Debug().
+		Str("goal_id", goalID).
+		Int("node_ids_count", len(nodeIDs)).
+		Int("all_suitable", len(commonSuitableNodes)).
+		Int("grouped", len(commonGroupedNodes)).
+		Int("non_grouped", len(commonNonGroupedNodes)).
+		Bool("has_enough", hasEnoughNodes).
+		Msg("найдены общие подходящие ноды")
+
+	return commonSuitableNodes, commonGroupedNodes, commonNonGroupedNodes, hasEnoughNodes
 }

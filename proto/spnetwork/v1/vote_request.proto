@@ -25,4 +25,7 @@ message VoteRequest {
   
   // Время ожидания в секундах для голосования
   int64 timeout_secs = 7;
+  
+  // Флаг достижения кворума
+  bool quorum_reached = 8;
 }

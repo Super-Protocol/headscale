@@ -4,14 +4,20 @@ import (
 	"fmt"
 	"github.com/juanfont/headscale/hscontrol/spnetwork/common"
 	"github.com/juanfont/headscale/hscontrol/spnetwork/common/entities"
+	"github.com/juanfont/headscale/hscontrol/spnetwork/consensus"
 	"github.com/rs/zerolog/log"
+	"math"
+	"sort"
 	"sync"
 	"time"
 )
 
+const NodeAliveTimeoutSecs = 3600
+
 type DeterministicGrouping struct {
 	registry         *common.EntityRegistry
 	localNode        *entities.Node
+	leaderSource     consensus.LeaderSource
 	groupingInterval time.Duration
 	mu               sync.Mutex
 	running          bool
@@ -19,10 +25,11 @@ type DeterministicGrouping struct {
 	groupingRunning  bool
 }
 
-func NewDeterministicGrouping(registry *common.EntityRegistry, localNode *entities.Node, groupingInterval time.Duration) (*DeterministicGrouping, error) {
+func NewDeterministicGrouping(registry *common.EntityRegistry, localNode *entities.Node, leaderSource consensus.LeaderSource, groupingInterval time.Duration) (*DeterministicGrouping, error) {
 	return &DeterministicGrouping{
 		registry:         registry,
 		localNode:        localNode,
+		leaderSource:     leaderSource,
 		groupingInterval: groupingInterval,
 		stopChan:         make(chan struct{}),
 	}, nil
@@ -31,253 +38,230 @@ func NewDeterministicGrouping(registry *common.EntityRegistry, localNode *entiti
 func (dg *DeterministicGrouping) processGoal(goal *entities.GroupGoal) error {
 	dg.mu.Lock()
 	defer dg.mu.Unlock()
-	//nodeId := dg.localNode.GetID()
-	//goalId := goal.GetID()
-	//nodeGoalGroups, err := dg.registry.GetNodeGroupsByGoal(goalId, nodeId)
-	//if err != nil {
-	//	return err
-	//}
-	//nodeInGoalGroup := len(nodeGoalGroups) > 0
-	//newGroup := entities.NewGroup()
-	//newGroup.SetGoal(goalId)
-	//newGroup.AddParticipant(nodeId)
+	if dg.leaderSource.IsLeader() {
+		existingGroups, err := dg.registry.GetGroupsByGoal(goal.GetID())
+		if err != nil {
+			return err
+		}
+		// Проверяем здоровье текущих групп
+		for _, group := range existingGroups {
+			// Исключаем мертвые ноды
+			participantsCopy := make([]entities.Participant, len(group.Participants))
+			copy(participantsCopy, group.Participants)
+			for _, participant := range participantsCopy {
+				if !dg.registry.IsNodeAlive(participant.ID, goal.InactivityTimeout) {
+					group.RemoveParticipant(participant.ID)
+					log.Debug().
+						Str("group_id", group.GetID()).
+						Str("participant_id", participant.ID).
+						Msg("removed participant that is not alive")
+				}
+			}
+			// Исключаем ноды которые больше не удовлетворяют условиям
+			var participantIDs []string
+			for _, participant := range participantsCopy {
+				participantIDs = append(participantIDs, participant.ID)
+			}
+			commonSuitableNodes, _, _, hasEnoughNodes := dg.registry.GetCommonNodesWithCapabilityForGoal(goal.GetID(), participantIDs, math.MaxInt)
+			if !hasEnoughNodes {
+				// Удаляем группу совсем?
+				err := dg.registry.Group.DeleteEntity(group.GetID())
+				if err != nil {
+					return err
+				}
+				break
+			}
+			for _, participant := range participantsCopy {
+				// Проверяем, находится ли участник в списке подходящих нод
+				found := false
+				for _, suitableNode := range commonSuitableNodes {
+					if suitableNode.GetID() == participant.ID {
+						found = true
+						break
+					}
+				}
 
-	/*
-			Новый алгоритм:
-			1. Внедряем оценку отсталости от сети - ведем статистику какой средний процент новых данных мы получили за последние N итераций.
-				Надо подумать что взять за N, но можно например число нод в сети.
-			2. Операции по группировке, голосование и прочее осуществляем только если оценка отсталости не более X
-			3. Операции по группировки осуществляет глобальный лидер сети
-			4. Лидер сети определяется неявным голосованием - нужна новая сущность Vote с типом network_leadership. А также LeadershipRequest. У Request есть таймаут.
-			5. Лидером считается тот за кого отдано 2/3 голосов нод за отведенный таймаут. Мы просто смотрим с конца список vote отсортированный по датам и лидер та нода которая первой наберет 2/3 голосов
-		       При этом старый лидер должен принять результаты голосования и сложить полномочия, когда кворум будет достигнут отправкой LeadershipResign.
-	*/
-	//if nodeInGoalGroup {
-	//	// Управляем группами если мы там лидеры
-	//	for _, group := range nodeGoalGroups {
-	//		participantNodes := make([]*entities.Node, 0, len(group.Participants))
-	//		for _, p := range group.Participants {
-	//			p, err := dg.registry.Node.GetEntity(p.ID)
-	//			if err != nil {
-	//				return err
-	//			}
-	//			participantNodes = append(participantNodes, p)
-	//		}
-	//		leader := getDeterministicLeader(participantNodes)
-	//		if leader.GetID() == nodeId {
-	//			// Мы лидеры, так что руководим этой группой
-	//
-	//			// Проверяем участников нашей группы
-	//			deadNodes := make([]*entities.Node, 0)
-	//			for _, participant := range participantNodes {
-	//				// Проверяем жива ли нода
-	//				if !dg.registry.IsNodeAlive(participant.GetID(), goal.InactivityTimeout) {
-	//					deadNodes = append(deadNodes, participant)
-	//				}
-	//				// Проверка что все ноды состоят только в 1 группе для цели, если нет - кикаем
-	//				participantGoalGroups, err := dg.registry.GetNodeGroupsByGoal(goalId, participant.GetID())
-	//				if err != nil {
-	//					return err
-	//				}
-	//				if len(participantGoalGroups) > 1 {
-	//					// Отсортируем группы по тому когда текущий участник к ней присоединился
-	//					sort.Slice(participantGoalGroups, func(i, j int) bool {
-	//						participantI, foundI := participantGoalGroups[i].GetParticipantByID(participant.GetID())
-	//						participantJ, foundJ := participantGoalGroups[j].GetParticipantByID(participant.GetID())
-	//
-	//						// Если участник не найден в какой-то группе, считаем, что он присоединился давно
-	//						if !foundI {
-	//							return false
-	//						}
-	//						if !foundJ {
-	//							return true
-	//						}
-	//
-	//						// Сортируем в обратном порядке (от большего времени к меньшему)
-	//						return participantI.JoinDateUnix > participantJ.JoinDateUnix
-	//					})
-	//
-	//					// Удаляем участника из первой группы (той, к которой он присоединился последней) если это та самая группа, где я лидер
-	//					if len(participantGoalGroups) > 0 && participantGoalGroups[0].GetID() == group.GetID() {
-	//						participantGoalGroups[0].RemoveParticipant(participant.GetID())
-	//					}
-	//				}
-	//			}
-	//
-	//			// Удаляем мертвые ноды
-	//			for _, deadNode := range deadNodes {
-	//				group.RemoveParticipant(deadNode.GetID())
-	//			}
-	//
-	//			// Удаляем ноды если их больше чем нужно
-	//			if len(group.GetParticipants()) > goal.GetMaxGroupSize() {
-	//				participants := group.GetParticipants()
-	//				countToDelete := len(participants) - goal.GetMaxGroupSize()
-	//				for i := 0; i < countToDelete; i++ {
-	//					participantToDelete := participants[len(participants)-i-1]
-	//					group.RemoveParticipant(participantToDelete.ID)
-	//				}
-	//			}
-	//
-	//			// Проверка, можно ли добавить какую-то еще ноду в группу, если есть место
-	//			// Проверка, можно ли добавить какую-то еще ноду в группу, если есть место
-	//			if len(group.GetParticipants()) < goal.GetMaxGroupSize() {
-	//				// Получаем всех не сгруппированных кандидатов с точки зрения текущей ноды
-	//				// (здесь nonGroupedCandidates уже отфильтрован GetNodesWithCapabilityForGoal)
-	//				_, _, nonGroupedCandidates, ok := dg.registry.GetNodesWithCapabilityForGoal(goalId, nodeId, 100000)
-	//				if ok {
-	//					addCount := goal.GetMaxGroupSize() - len(group.GetParticipants())
-	//					addedCount := 0
-	//					for i := 0; i < len(nonGroupedCandidates) && addedCount < addCount; i++ {
-	//						candidateToAdd := nonGroupedCandidates[i]
-	//
-	//						// Проверяем, что кандидат еще не в группе
-	//						isAlreadyParticipant := false
-	//						for _, p := range group.GetParticipants() {
-	//							if p.ID == candidateToAdd.GetID() {
-	//								isAlreadyParticipant = true
-	//								break
-	//							}
-	//						}
-	//						if isAlreadyParticipant {
-	//							continue // Пропускаем, если уже в группе
-	//						}
-	//
-	//						// Получаем список кандидатов с точки зрения потенциального нового участника
-	//						// для текущей цели группировки (goalId).
-	//						// Мы передаем ID потенциального кандидата (candidateToAdd.GetID()) в качестве nodeId
-	//						// для функции GetNodesWithCapabilityForGoal.
-	//						// Это позволит узнать, кого candidateToAdd считает подходящими для этой цели.
-	//						_, _, potentialCandidateViewOfNonGrouped, potentialCandidateViewOk := dg.registry.GetNodesWithCapabilityForGoal(goalId, candidateToAdd.GetID(), 100000)
-	//
-	//						if !potentialCandidateViewOk {
-	//							log.Debug().
-	//								Str("goal_id", goalId).
-	//								Str("candidate_id", candidateToAdd.GetID()).
-	//								Msg("potential candidate does not have enough capability for this goal or an error occurred")
-	//							continue // Если сам кандидат не может найти себе группу или ошибка, пропускаем
-	//						}
-	//
-	//						// Создаем мапу для быстрого поиска нод в представлении потенциального кандидата
-	//						potentialCandidateViewMap := make(map[string]bool)
-	//						for _, n := range potentialCandidateViewOfNonGrouped {
-	//							potentialCandidateViewMap[n.GetID()] = true
-	//						}
-	//
-	//						// Проверяем, содержатся ли все текущие участники группы (кроме самой текущей ноды-лидера
-	//						// и самого потенциального кандидата) в списке кандидатов потенциального участника
-	//						allCurrentParticipantsCompatible := true
-	//						for _, currentParticipant := range group.GetParticipants() {
-	//							// Исключаем саму ноду-лидера и потенциального кандидата из проверки,
-	//							// так как они уже учтены в GetNodesWithCapabilityForGoal или будут добавлены.
-	//							if currentParticipant.ID == dg.localNode.GetID() || currentParticipant.ID == candidateToAdd.GetID() {
-	//								continue
-	//							}
-	//							if _, exists := potentialCandidateViewMap[currentParticipant.ID]; !exists {
-	//								allCurrentParticipantsCompatible = false
-	//								log.Debug().
-	//									Str("goal_id", goalId).
-	//									Str("candidate_id", candidateToAdd.GetID()).
-	//									Str("incompatible_participant_id", currentParticipant.ID).
-	//									Msg("potential candidate does not see all current group participants as compatible")
-	//								break
-	//							}
-	//						}
-	//
-	//						if allCurrentParticipantsCompatible {
-	//							group.AddParticipant(candidateToAdd.GetID())
-	//							addedCount++
-	//							log.Debug().
-	//								Str("goal_id", goalId).
-	//								Str("group_id", group.GetID()).
-	//								Str("node_id", dg.localNode.GetID()).
-	//								Str("added_participant_id", candidateToAdd.GetID()).
-	//								Msg("added new participant to group after compatibility check")
-	//						}
-	//					}
-	//				}
-	//			}
-	//
-	//		} else {
-	//			// Проверяем жив ли вообще лидер и если мы без лидера с наименьшим id
-	//			// то берем лидерство на себя, удаляем лидера из группы
-	//			if !dg.registry.IsNodeAlive(leader.GetID(), goal.InactivityTimeout) {
-	//				participantNodesWithoutLeader := make([]*entities.Node, 0, len(group.Participants)-1)
-	//				for _, p := range participantNodes {
-	//					if p.GetID() != leader.GetID() {
-	//						participantNodesWithoutLeader = append(participantNodesWithoutLeader, p)
-	//					}
-	//				}
-	//				leaderCandidate := getDeterministicLeader(participantNodesWithoutLeader)
-	//				if leaderCandidate.GetID() == nodeId {
-	//					// Нагло удаляем старого лидера из группы и занимаем его место
-	//					group.RemoveParticipant(leader.GetID())
-	//				}
-	//			}
-	//		}
-	//	}
-	//} else {
-	//	bestCandidates, groupedCandidates, nonGroupedCandidates, ok := dg.registry.GetNodesWithCapabilityForGoal(goalId, nodeId,)
-	//	if !ok {
-	//		return nil
-	//	}
-	//	candidatesCountEnough := len(bestCandidates) >= goal.MinGroupSize
-	//	if candidatesCountEnough {
-	//		// Уже есть ноды с группами, поэтому сначала пытаемся подключить к существующей
-	//		groupsMap := make(map[string]*entities.Group)
-	//		for _, candidate := range groupedCandidates {
-	//			groups, err := dg.registry.GetNodeGroupsByGoal(goalId, candidate.GetID())
-	//			if err != nil {
-	//				return err
-	//			}
-	//			for _, group := range groups {
-	//				groupsMap[group.GetID()] = group
-	//			}
-	//		}
-	//		uniqueGroups := make([]*entities.Group, 0)
-	//		for _, group := range groupsMap {
-	//			uniqueGroups = append(uniqueGroups, group)
-	//		}
-	//		sort.Slice(uniqueGroups, func(i, j int) bool {
-	//			return len(uniqueGroups[i].GetParticipants()) < len(uniqueGroups[j].GetParticipants())
-	//		})
-	//
-	//		if len(uniqueGroups) > 0 {
-	//			existingGroups := uniqueGroups[0]
-	//			// Есть незаполненная группа
-	//			if len(existingGroups.GetParticipants()) < goal.GetMaxGroupSize() {
-	//				// По идее лидер нас сам должен увидеть и подключить к группе
-	//				// Поэтому ничего не делаем
-	//				return nil
-	//			} else { // Все группы заполнены - тогда смотрим среди остальных кандидатов мы лидеры?
-	//				leader := getDeterministicLeader(nonGroupedCandidates)
-	//				if leader != nil && leader.GetID() == nodeId {
-	//					_, err := dg.registry.Group.StoreEntity(newGroup)
-	//					if err != nil {
-	//						return err
-	//					}
-	//				}
-	//			}
-	//		} else {
-	//			// Если существующих групп мы не видим среди списка кандидатов, то если мы лидер потенциальной групп
-	//			// мы просто создаем свою
-	//			leadedCandidate := getDeterministicLeader(append(nonGroupedCandidates, dg.localNode))
-	//			if leadedCandidate != nil && leadedCandidate.GetID() == nodeId {
-	//				_, err := dg.registry.Group.StoreEntity(newGroup)
-	//				if err != nil {
-	//					return err
-	//				}
-	//			}
-	//		}
-	//	} else {
-	//		return nil
-	//	}
-	//}
+				// Если участник не найден в списке подходящих нод, удаляем его из группы
+				if !found {
+					group.RemoveParticipant(participant.ID)
+					log.Debug().
+						Str("group_id", group.GetID()).
+						Str("participant_id", participant.ID).
+						Msg("removed participant that is no longer suitable for this group")
+				}
+			}
+			// Проверяем размеры группы и удаляем лишние
+			if len(group.Participants) > goal.MaxGroupSize {
+				participantsCopy := make([]entities.Participant, len(group.Participants))
+				copy(participantsCopy, group.Participants)
 
-	// Общесетевые решения
-	// Проверка что количество групп не превышает допустимое
-	// Я могу быть лидером среди всех групп, имея наименьший ID и могу принять решение по удалению своей группы как лишней
-	// ToDo
+				// Сортируем участников по дате добавления (от новых к старым)
+				sort.Slice(participantsCopy, func(i, j int) bool {
+					return participantsCopy[i].JoinDateUnix > participantsCopy[j].JoinDateUnix
+				})
+
+				// Удаляем участника, который был добавлен последним
+				if len(participantsCopy) > 0 {
+					participantToRemove := participantsCopy[0]
+					group.RemoveParticipant(participantToRemove.ID)
+					log.Debug().
+						Str("group_id", group.GetID()).
+						Str("participant_id", participantToRemove.ID).
+						Int64("join_date", participantToRemove.JoinDateUnix).
+						Msg("removed most recently added participant to maintain maximum group size")
+				}
+			}
+			// Проверяем размеры группы и добавляем новые
+			if len(group.Participants) < goal.MaxGroupSize {
+				_, _, commonNonGroupedNodes, _ := dg.registry.GetCommonNodesWithCapabilityForGoal(goal.GetID(), participantIDs, goal.MaxGroupSize*2)
+				maxCountToAdd := goal.MaxGroupSize - len(group.Participants)
+				for i := 0; i < maxCountToAdd && i < len(commonNonGroupedNodes); i++ {
+					group.AddParticipant(commonNonGroupedNodes[i].GetID())
+				}
+			}
+		}
+		// Пытаемся собрать новые группы
+		nonGroupedNodes, err := dg.registry.GetNonGroupedNodesForGoal(goal.GetID())
+		if err != nil {
+			log.Error().
+				Err(err).
+				Str("goal_id", goal.GetID()).
+				Msg("ошибка при получении несгруппированных нод")
+			return err
+		}
+
+		if len(nonGroupedNodes) == 0 {
+			log.Debug().
+				Str("goal_id", goal.GetID()).
+				Msg("нет несгруппированных нод для создания новых групп")
+			return nil
+		}
+
+		// Проверяем, что есть достаточно нод для возможности создания хотя бы одной группы
+		if len(nonGroupedNodes) < goal.GetMinGroupSize() {
+			log.Debug().
+				Str("goal_id", goal.GetID()).
+				Int("non_grouped_nodes", len(nonGroupedNodes)).
+				Int("min_required", goal.GetMinGroupSize()).
+				Msg("недостаточно несгруппированных нод для создания группы")
+			return nil
+		}
+
+		// Получаем ID всех несгруппированных нод
+		nonGroupedNodeIDs := make([]string, len(nonGroupedNodes))
+		for i, node := range nonGroupedNodes {
+			nonGroupedNodeIDs[i] = node.GetID()
+		}
+
+		// Выполняем GetCommonNodesWithCapabilityForGoal для списка несгруппированных нод
+		_, _, commonNonGroupedNodes, hasEnough := dg.registry.GetCommonNodesWithCapabilityForGoal(
+			goal.GetID(),
+			nonGroupedNodeIDs,
+			math.MaxInt)
+
+		log.Debug().
+			Str("goal_id", goal.GetID()).
+			Int("non_grouped_nodes", len(nonGroupedNodes)).
+			Int("common_non_grouped_nodes", len(commonNonGroupedNodes)).
+			Bool("has_enough_nodes", hasEnough).
+			Msg("получен список совместимых несгруппированных нод")
+
+		// Проверяем, что есть достаточно нод для создания хотя бы одной группы
+		if len(commonNonGroupedNodes) < goal.GetMinGroupSize() {
+			log.Debug().
+				Str("goal_id", goal.GetID()).
+				Int("common_non_grouped_nodes", len(commonNonGroupedNodes)).
+				Int("min_required", goal.GetMinGroupSize()).
+				Msg("недостаточно совместимых нод для создания группы")
+			return nil
+		}
+
+		// Разделяем список commonNonGroupedNodes на подгруппы размером goal.MaxGroupSize
+		maxGroupSize := goal.GetMaxGroupSize()
+		minGroupSize := goal.GetMinGroupSize()
+		numGroups := (len(commonNonGroupedNodes) + maxGroupSize - 1) / maxGroupSize
+
+		for i := 0; i < numGroups; i++ {
+			// Определяем индексы начала и конца для текущей подгруппы
+			startIdx := i * maxGroupSize
+			endIdx := startIdx + maxGroupSize
+			if endIdx > len(commonNonGroupedNodes) {
+				endIdx = len(commonNonGroupedNodes)
+			}
+
+			// Проверяем, что подгруппа достаточно большая (не меньше MinGroupSize)
+			if endIdx-startIdx < minGroupSize {
+				log.Debug().
+					Str("goal_id", goal.GetID()).
+					Int("nodes_in_subgroup", endIdx-startIdx).
+					Int("min_required", minGroupSize).
+					Msg("пропуск создания группы - недостаточный размер подгруппы")
+				continue
+			}
+
+			// Создаем новую группу
+			newGroup := entities.NewGroup()
+			newGroup.SetGoal(goal.GetID())
+
+			// Добавляем ноды в группу
+			for j := startIdx; j < endIdx; j++ {
+				newGroup.AddParticipant(commonNonGroupedNodes[j].GetID())
+			}
+
+			// Сохраняем группу в реестре
+			_, err := dg.registry.Group.StoreEntity(newGroup)
+			if err != nil {
+				log.Error().
+					Err(err).
+					Str("goal_id", goal.GetID()).
+					Str("group_id", newGroup.GetID()).
+					Msg("ошибка при сохранении новой группы")
+				continue
+			}
+
+			log.Info().
+				Str("goal_id", goal.GetID()).
+				Str("group_id", newGroup.GetID()).
+				Int("participants", len(newGroup.GetParticipants())).
+				Msg("создана новая группа из несгруппированных нод")
+		}
+
+		// Удаляем группы у которых размер меньше минимального
+		// GetGroupsByGoal уже возвращает только неудаленные группы
+		existingGroups, err = dg.registry.GetGroupsByGoal(goal.GetID())
+		if err != nil {
+			log.Error().
+				Err(err).
+				Str("goal_id", goal.GetID()).
+				Msg("ошибка при получении групп для проверки минимального размера")
+			return err
+		}
+
+		for _, group := range existingGroups {
+			// Проверяем размер группы и удаляем, если он меньше минимального
+			if len(group.GetParticipants()) < goal.GetMinGroupSize() {
+				log.Info().
+					Str("goal_id", goal.GetID()).
+					Str("group_id", group.GetID()).
+					Int("participants", len(group.GetParticipants())).
+					Int("min_required", goal.GetMinGroupSize()).
+					Msg("удаление группы с недостаточным количеством участников")
+
+				// Помечаем группу как удаленную
+				group.MarkDeleted()
+
+				// И сохраняем изменения в реестре
+				_, err := dg.registry.Group.StoreEntity(group)
+				if err != nil {
+					log.Error().
+						Err(err).
+						Str("goal_id", goal.GetID()).
+						Str("group_id", group.GetID()).
+						Msg("ошибка при удалении группы с недостаточным количеством участников")
+				}
+			}
+		}
+	}
 	return nil
 }
 

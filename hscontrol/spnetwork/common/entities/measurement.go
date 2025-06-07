@@ -123,6 +123,17 @@ func (m *Measurement) MarkDeleted() {
 	m.Version++
 }
 
+// SetDeleted устанавливает статус удаления измерения и увеличивает версию
+func (m *Measurement) SetDeleted(deleted bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	
+	if m.Deleted != deleted {
+		m.Deleted = deleted
+		m.Version++
+	}
+}
+
 // MeasurementFromProto создает Measurement из protobuf сообщения
 func MeasurementFromProto(p *p.Measurement) *Measurement {
 	return &Measurement{

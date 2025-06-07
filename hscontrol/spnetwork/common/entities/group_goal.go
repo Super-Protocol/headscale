@@ -177,6 +177,16 @@ func (g *GroupGoal) MarkDeleted() {
 	g.Version++
 }
 
+// SetDeleted устанавливает статус удаления цели и увеличивает версию
+func (g *GroupGoal) SetDeleted(deleted bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.Deleted != deleted {
+		g.Deleted = deleted
+		g.Version++
+	}
+}
+
 // GetHash вычисляет хеш для группировочной цели, используя только ID и Version
 func (g *GroupGoal) GetHash() []byte {
 	g.mu.RLock()

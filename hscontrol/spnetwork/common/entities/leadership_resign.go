@@ -61,6 +61,14 @@ func (lr *LeadershipResign) IsDeleted() bool {
 	return lr.deleted
 }
 
+// SetDeleted устанавливает статус удаления отказа от лидерства и увеличивает версию
+func (lr *LeadershipResign) SetDeleted(deleted bool) {
+	if lr.deleted != deleted {
+		lr.deleted = deleted
+		lr.version++
+	}
+}
+
 // GetHash возвращает хеш отказа от лидерства
 func (lr *LeadershipResign) GetHash() []byte {
 	h := md5.New()

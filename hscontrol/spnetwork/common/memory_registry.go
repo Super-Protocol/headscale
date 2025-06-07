@@ -6,15 +6,13 @@ import (
 )
 
 type MemoryEntityRegistry struct {
-	entities        map[string]map[string]Entity // map[entityType]map[entityID]Entity
-	deletedEntities map[string]map[string]bool
-	mu              sync.RWMutex
+	entities map[string]map[string]Entity // map[entityType]map[entityID]Entity
+	mu       sync.RWMutex
 }
 
 func NewMemoryEntityRegistry() *MemoryEntityRegistry {
 	return &MemoryEntityRegistry{
-		entities:        make(map[string]map[string]Entity),
-		deletedEntities: make(map[string]map[string]bool),
+		entities: make(map[string]map[string]Entity),
 	}
 }
 
@@ -59,14 +57,6 @@ func (r *MemoryEntityRegistry) StoreEntity(entityType string, entity Entity) (bo
 
 	if typeMap, exists := r.entities[entityType]; exists {
 		if existingEntity, found := typeMap[entityID]; found {
-
-			// If deleted do nothing
-			if deletedMap, exists := r.deletedEntities[entityType]; exists {
-				if _, exists := deletedMap[entityID]; exists {
-					return false, nil
-				}
-			}
-
 			if entity.GetVersion() <= existingEntity.GetVersion() {
 				return false, nil
 			}
@@ -84,14 +74,13 @@ func (r *MemoryEntityRegistry) DeleteEntity(entityType string, id string) error 
 	defer r.mu.Unlock()
 
 	if typeMap, exists := r.entities[entityType]; exists {
-		if _, found := typeMap[id]; found {
+		if entity, found := typeMap[id]; found {
+			// Сначала помечаем сущность как удаленную
+			entity.SetDeleted(true)
 
-			if _, exists := r.deletedEntities[entityType]; !exists {
-				r.deletedEntities[entityType] = make(map[string]bool)
-			}
-
-			r.deletedEntities[entityType][id] = true
-
+			// Затем удаляем из мапы
+			// Эта сущность останется доступной при вызове GetAllEntitiesByType
+			// только если кто-то сохранит ссылку на неё
 			delete(typeMap, id)
 			return nil
 		}

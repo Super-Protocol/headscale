@@ -29,10 +29,11 @@ type MonkeyMeasurer struct {
 	stopChan                   chan struct{}
 	measureRunning             bool
 	rand                       *rand.Rand
+	blackList                  map[string]bool
 }
 
 // NewMonkeyMeasurer создает новый экземпляр MonkeyMeasurer
-func NewMonkeyMeasurer(entityRegistry *common.EntityRegistry, localNode *entities.Node, config MonkeyMeasurerConfig) (*MonkeyMeasurer, error) {
+func NewMonkeyMeasurer(entityRegistry *common.EntityRegistry, localNode *entities.Node, config MonkeyMeasurerConfig, blackList map[string]bool) (*MonkeyMeasurer, error) {
 	log.Debug().
 		Str("node_id", localNode.GetID()).
 		Dur("measure_interval", config.MeasureInterval).
@@ -56,6 +57,7 @@ func NewMonkeyMeasurer(entityRegistry *common.EntityRegistry, localNode *entitie
 		nodeUnavailableProbability: config.NodeUnavailableProbability,
 		stopChan:                   make(chan struct{}),
 		rand:                       rand.New(rand.NewSource(time.Now().UnixNano())),
+		blackList:                  blackList,
 	}
 
 	log.Info().
@@ -181,8 +183,26 @@ func (m *MonkeyMeasurer) runMeasureIfNotRunning() error {
 	return nil
 }
 
+// IsInBlackList проверяет, находится ли нода в черном списке
+func (m *MonkeyMeasurer) IsInBlackList(nodeID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	_, exists := m.blackList[nodeID]
+	return exists
+}
+
 // measureNode генерирует случайное измерение задержки до указанной ноды
 func (m *MonkeyMeasurer) measureNode(targetNode *entities.Node) error {
+	// Проверяем, находится ли нода в черном списке
+	if m.IsInBlackList(targetNode.GetID()) {
+		log.Debug().
+			Str("node_id", m.localNode.GetID()).
+			Str("target_node", targetNode.GetID()).
+			Msg("node is blacklisted, skipping measurement")
+		return nil
+	}
+
 	// Проверяем, доступна ли нода (с заданной вероятностью)
 	if m.rand.Float64() < m.nodeUnavailableProbability {
 		log.Debug().
@@ -199,6 +219,7 @@ func (m *MonkeyMeasurer) measureNode(targetNode *entities.Node) error {
 
 	// Если измерение существует и мы решаем использовать старое значение
 	if found && m.rand.Float64() > m.newValueProbability {
+		measurement.UpdateValue(measurement.Value, time.Now().Unix())
 		log.Debug().
 			Str("node_id", m.localNode.GetID()).
 			Str("target_node", targetNode.GetID()).

@@ -13,38 +13,41 @@ const DefaultVoteRequestTimeoutSecs int64 = 1800
 
 // VoteRequest представляет запрос на голосование
 type VoteRequest struct {
-	id          string
-	kind        VoteKind
-	target      string
-	dateUnix    int64
-	version     uint64
-	deleted     bool
-	timeoutSecs int64
+	id            string
+	kind          VoteKind
+	target        string
+	dateUnix      int64
+	version       uint64
+	deleted       bool
+	timeoutSecs   int64
+	quorumReached bool
 }
 
 // NewVoteRequest создает новый экземпляр VoteRequest
 func NewVoteRequest(kind VoteKind, target string, dateUnix int64) *VoteRequest {
 	return &VoteRequest{
-		id:          uuid.New().String(),
-		kind:        kind,
-		target:      target,
-		dateUnix:    dateUnix,
-		version:     0,
-		deleted:     false,
-		timeoutSecs: DefaultVoteRequestTimeoutSecs,
+		id:            uuid.New().String(),
+		kind:          kind,
+		target:        target,
+		dateUnix:      dateUnix,
+		version:       0,
+		deleted:       false,
+		timeoutSecs:   DefaultVoteRequestTimeoutSecs,
+		quorumReached: false,
 	}
 }
 
 // NewVoteRequestWithTimeout создает новый экземпляр VoteRequest с указанным таймаутом
 func NewVoteRequestWithTimeout(kind VoteKind, target string, dateUnix int64, timeoutSecs int64) *VoteRequest {
 	return &VoteRequest{
-		id:          uuid.New().String(),
-		kind:        kind,
-		target:      target,
-		dateUnix:    dateUnix,
-		version:     0,
-		deleted:     false,
-		timeoutSecs: timeoutSecs,
+		id:            uuid.New().String(),
+		kind:          kind,
+		target:        target,
+		dateUnix:      dateUnix,
+		version:       0,
+		deleted:       false,
+		timeoutSecs:   timeoutSecs,
+		quorumReached: false,
 	}
 }
 
@@ -83,6 +86,27 @@ func (vr *VoteRequest) IsDeleted() bool {
 	return vr.deleted
 }
 
+// SetDeleted устанавливает статус удаления запроса на голосование и увеличивает версию
+func (vr *VoteRequest) SetDeleted(deleted bool) {
+	if vr.deleted != deleted {
+		vr.deleted = deleted
+		vr.version++
+	}
+}
+
+// IsQuorumReached возвращает признак достижения кворума для запроса на голосование
+func (vr *VoteRequest) IsQuorumReached() bool {
+	return vr.quorumReached
+}
+
+// SetQuorumReached устанавливает статус достижения кворума и увеличивает версию
+func (vr *VoteRequest) SetQuorumReached(quorumReached bool) {
+	if vr.quorumReached != quorumReached {
+		vr.quorumReached = quorumReached
+		vr.version++
+	}
+}
+
 // IsActive проверяет, является ли запрос на голосование активным в данный момент
 // (не удален и не истек срок таймаута)
 func (vr *VoteRequest) IsActive(currentTimeUnix int64) bool {
@@ -110,13 +134,14 @@ func (vr *VoteRequest) GetHash() []byte {
 // ToProto преобразует VoteRequest в протобуф-объект
 func (vr *VoteRequest) ToProto() *p.VoteRequest {
 	return &p.VoteRequest{
-		Id:          vr.id,
-		Kind:        string(vr.kind),
-		Target:      vr.target,
-		DateUnix:    vr.dateUnix,
-		Version:     vr.version,
-		Deleted:     vr.deleted,
-		TimeoutSecs: vr.timeoutSecs,
+		Id:            vr.id,
+		Kind:          string(vr.kind),
+		Target:        vr.target,
+		DateUnix:      vr.dateUnix,
+		Version:       vr.version,
+		Deleted:       vr.deleted,
+		TimeoutSecs:   vr.timeoutSecs,
+		QuorumReached: vr.quorumReached,
 	}
 }
 
@@ -128,13 +153,14 @@ func (vr *VoteRequest) Serialize() ([]byte, error) {
 // VoteRequestFromProto создает VoteRequest из протобуф-объекта
 func VoteRequestFromProto(p *p.VoteRequest) *VoteRequest {
 	return &VoteRequest{
-		id:          p.Id,
-		kind:        VoteKind(p.Kind),
-		target:      p.Target,
-		dateUnix:    p.DateUnix,
-		version:     p.Version,
-		deleted:     p.Deleted,
-		timeoutSecs: p.TimeoutSecs,
+		id:            p.Id,
+		kind:          VoteKind(p.Kind),
+		target:        p.Target,
+		dateUnix:      p.DateUnix,
+		version:       p.Version,
+		deleted:       p.Deleted,
+		timeoutSecs:   p.TimeoutSecs,
+		quorumReached: p.QuorumReached,
 	}
 }
 
