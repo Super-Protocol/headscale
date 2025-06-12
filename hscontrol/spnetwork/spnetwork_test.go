@@ -27,7 +27,7 @@ import (
 // корректно синхронизируют информацию о узлах сети между собой
 func TestSPNetworkSynchronization(t *testing.T) {
 	// Количество серверов для теста (легко меняется)
-	numServers := 7
+	numServers := 15
 
 	// Создаем временный каталог для сертификатов
 	tempDir, err := os.MkdirTemp("", "spnetwork-test")
@@ -112,6 +112,18 @@ func TestSPNetworkSynchronization(t *testing.T) {
 			if err != nil {
 				return
 			}
+
+			consensusGroupGoal2 := entities.NewGroupGoalWithTimeout(2, 15, 10)
+			consensusGroupGoal2.AddDimensionCriterion(entities.DimensionCriterion{
+				Type:      entities.LatencyClass,
+				Condition: entities.ConditionBetween,
+				Values:    []float64{0, 3},
+			})
+			_, err = registry.GroupGoal.StoreEntity(consensusGroupGoal2)
+			if err != nil {
+				return
+			}
+
 			server = api.NewServer(registry)
 			go func() {
 				err = server.Start("127.0.0.1:8911")

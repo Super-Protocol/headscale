@@ -15,12 +15,14 @@ type Server struct {
 	EntityRegistry *common.EntityRegistry
 	router         *mux.Router
 	httpServer     *http.Server
+	eventLog       *[]string
 }
 
 // NewServer создает новый экземпляр сервера для EntityRegistry
-func NewServer(registry *common.EntityRegistry) *Server {
+func NewServer(registry *common.EntityRegistry, eventLog *[]string) *Server {
 	s := &Server{
 		EntityRegistry: registry,
+		eventLog:       eventLog,
 	}
 	s.setupRouter()
 	return s
@@ -38,6 +40,7 @@ func (s *Server) setupRouter() {
 	s.registerVoteRoutes(r)
 	s.registerVoteRequestRoutes(r)
 	s.registerLeadershipResignRoutes(r)
+	s.registerEventLogRoutes(r)
 
 	s.router = r
 }

@@ -25,27 +25,28 @@ import (
 
 type GrpcTransportConfig TransportConfig
 
-// SyncStat хранит информацию о результатах одной синхронизации
+// SyncStat stores information about results of a single synchronization
 type SyncStat struct {
-	Timestamp       time.Time // Время синхронизации
-	RemoteNodeID    string    // ID удаленной ноды
-	TotalEntities   int       // Общее количество сущностей
-	DiffEntities    int       // Количество отличающихся сущностей
-	SyncCoefficient float64   // Коэффициент синхронизации для данной операции
+	Timestamp       time.Time // Synchronization time
+	RemoteNodeID    string    // Remote node ID
+	TotalEntities   int       // Total number of entities
+	DiffEntities    int       // Number of different entities
+	SyncCoefficient float64   // Synchronization coefficient for this operation
 }
 
 type GrpcTransport struct {
-	entityRegistry *common.EntityRegistry
-	localNode      *entities.Node
-	running        bool
-	mu             sync.Mutex
-	grpcServer     *grpc.Server
-	clients        map[string]*grpc.ClientConn
-	clientsMu      sync.RWMutex
-	tlsConfig      *tls.Config
-	listenAddr     string
-	syncStats      []SyncStat   // История синхронизаций
-	syncStatsMu    sync.RWMutex // Мьютекс для доступа к истории синхронизаций
+	entityRegistry  *common.EntityRegistry
+	localNode       *entities.Node
+	running         bool
+	mu              sync.Mutex
+	grpcServer      *grpc.Server
+	clients         map[string]*grpc.ClientConn
+	clientsMu       sync.RWMutex
+	tlsConfig       *tls.Config
+	clientTLSConfig *tls.Config
+	listenAddr      string
+	syncStats       []SyncStat   // История синхронизаций
+	syncStatsMu     sync.RWMutex // Мьютекс для доступа к истории синхронизаций
 }
 
 // GossipServiceServer represents a gRPC server for message processing
@@ -55,31 +56,31 @@ type GossipServiceServer struct {
 }
 
 const (
-	// depthBits определяет, сколько бит мы берём из MD5(ID) для индексирования bucket'ов.
-	// depthBits = 8 → 256 корзин; depthBits = 10 → 1024 корзин.
+	// depthBits defines how many bits we take from MD5(ID) for bucket indexing.
+	// depthBits = 8 → 256 buckets; depthBits = 10 → 1024 buckets.
 	depthBits    = 8
 	totalBuckets = 1 << depthBits
 )
 
 const minSyncIterations = 100
 
-// getBucketIndexFromID возвращает номер корзины [0..totalBuckets-1] для конкретного ID.
-// Мы берём первые depthBits бит из MD5(ID).
+// getBucketIndexFromID returns the bucket number [0..totalBuckets-1] for a specific ID.
+// We take the first depthBits bits from MD5(ID).
 func getBucketIndexFromID(id []byte) int {
 	sum := md5.Sum(id) // [16]byte
-	// depthBits <= 8: возьмём старшие depthBits бит из первого байта
+	// depthBits <= 8: take the highest depthBits bits from the first byte
 	if depthBits <= 8 {
-		// shiftRight = 8 - depthBits, чтобы получить только нужное число бит
+		// shiftRight = 8 - depthBits, to get only the needed number of bits
 		return int(sum[0]) >> (8 - depthBits)
 	}
-	// Если depthBits > 8, то нужно взять, например, sum[0] как старшие 8 бит,
-	// а к ним добавить (depthBits-8) бит из sum[1]. Но в примере depthBits=8.
+	// If depthBits > 8, we need to take, for example, sum[0] as the highest 8 bits,
+	// and add (depthBits-8) bits from sum[1]. But in this example depthBits=8.
 	return int(sum[0])
 }
 
-// computeBucketHash собирает MD5-хэш от упорядоченного списка (ID||version),
-// чтобы при любом изменении версии или содержимого у entity хэш менялся.
-// entities уже все лежат внутри одной корзины.
+// computeBucketHash creates an MD5 hash from an ordered list of (ID||version),
+// so that any change in version or content of an entity changes the hash.
+// entities are already all inside one bucket.
 func computeBucketHash(entities []common.Entity) []byte {
 	sort.Slice(entities, func(i, j int) bool {
 		return entities[i].GetID() < entities[j].GetID()
@@ -92,7 +93,7 @@ func computeBucketHash(entities []common.Entity) []byte {
 		h.Write(id)
 		h.Write(versionBytes)
 	}
-	return h.Sum(nil) // 16 байт MD5
+	return h.Sum(nil) // 16 bytes MD5
 }
 
 func NewGrpcTransport(entityRegistry *common.EntityRegistry, localNode *entities.Node, config GrpcTransportConfig) (*GrpcTransport, error) {
@@ -137,6 +138,7 @@ func NewGrpcTransport(entityRegistry *common.EntityRegistry, localNode *entities
 		return nil, fmt.Errorf("failed to load server certificate: %v", err)
 	}
 
+	// Server TLS configuration with mandatory client authentication
 	tlsConfig := &tls.Config{
 		Certificates: []tls.Certificate{cert},
 		ClientCAs:    rootCAs,
@@ -145,15 +147,24 @@ func NewGrpcTransport(entityRegistry *common.EntityRegistry, localNode *entities
 		MinVersion:   tls.VersionTLS12,
 	}
 
+	// Client TLS configuration with hostname verification disabled
+	clientTLSConfig := &tls.Config{
+		Certificates:       []tls.Certificate{cert},
+		RootCAs:            rootCAs,
+		InsecureSkipVerify: true, // Disable common name verification in server certificate
+		MinVersion:         tls.VersionTLS12,
+	}
+
 	listenAddr := fmt.Sprintf("%s:%d", config.ListenHost, config.ListenPort)
 	transport := &GrpcTransport{
-		localNode:      localNode,
-		running:        false,
-		clients:        make(map[string]*grpc.ClientConn),
-		tlsConfig:      tlsConfig,
-		listenAddr:     listenAddr,
-		entityRegistry: entityRegistry,
-		syncStats:      make([]SyncStat, 0),
+		localNode:       localNode,
+		running:         false,
+		clients:         make(map[string]*grpc.ClientConn),
+		tlsConfig:       tlsConfig,
+		clientTLSConfig: clientTLSConfig,
+		listenAddr:      listenAddr,
+		entityRegistry:  entityRegistry,
+		syncStats:       make([]SyncStat, 0),
 	}
 
 	log.Info().
@@ -163,14 +174,14 @@ func NewGrpcTransport(entityRegistry *common.EntityRegistry, localNode *entities
 	return transport, nil
 }
 
-// GetData теперь сравнивает заранее рассчитанные клиентом MD5-хэши корзин (BucketHashes)
-// и отдаёт только данные (full Serialize()), относящиеся к тем корзинам, где хэши !=.
+// GetData now compares the pre-calculated client MD5 bucket hashes (BucketHashes)
+// and returns only data (full Serialize()) related to those buckets where hashes !=.
 func (s *GossipServiceServer) GetData(ctx context.Context, req *pb.GetDataRequest) (*pb.GetDataResponse, error) {
 
 	log.Debug().
 		Str("local_node_id", s.transport.localNode.GetID()).
 		Str("req_node_id", req.NodeId).
-		Msg("Обработка запроса GetData")
+		Msg("Processing GetData request")
 
 	// Получаем все сущности через EntityRegistry
 	entitiesByType := make(map[string][]common.Entity)
@@ -471,28 +482,28 @@ func (t *GrpcTransport) Stop() error {
 	return nil
 }
 
-// GetSyncCoef возвращает коэффициент синхронизации от 0 до 1, где:
-// 0 - нода полностью рассинхронизирована с остальными
-// 1 - нода полностью синхронизирована
-// Коэффициент рассчитывается как среднее значение за последние maxSyncStats синхронизаций.
-// Если количество синхронизаций меньше minSyncStats, то возвращается 0.
+// GetSyncCoef returns a synchronization coefficient from 0 to 1, where:
+// 0 - the node is completely out of sync with others
+// 1 - the node is fully synchronized
+// The coefficient is calculated as the average value over the last maxSyncStats synchronizations.
+// If the number of synchronizations is less than minSyncStats, 0 is returned.
 func (t *GrpcTransport) GetSyncCoef() float32 {
 	t.syncStatsMu.RLock()
 	defer t.syncStatsMu.RUnlock()
 
 	minSyncStats := minSyncIterations
 
-	// Если количество синхронизаций меньше minSyncStats, возвращаем 0
+	// If the number of synchronizations is less than minSyncStats, return 0
 	if len(t.syncStats) < minSyncStats {
 		log.Debug().
 			Str("node_id", t.localNode.GetID()).
 			Int("current_syncs", len(t.syncStats)).
 			Int("required_syncs", minSyncStats).
-			Msg("Недостаточно данных о синхронизации для расчета коэффициента")
+			Msg("Not enough synchronization data to calculate coefficient")
 		return 0.0
 	}
 
-	// Вычисляем среднее значение за последние N синхронизаций
+	// Calculate the average value for the last N synchronizations
 	startIdx := 0
 	if len(t.syncStats) > minSyncStats {
 		startIdx = len(t.syncStats) - minSyncStats
@@ -509,7 +520,7 @@ func (t *GrpcTransport) GetSyncCoef() float32 {
 		Str("node_id", t.localNode.GetID()).
 		Int("stats_count", len(t.syncStats)-startIdx).
 		Float32("sync_coef", avgCoef).
-		Msg("Вычислен коэффициент синхронизации")
+		Msg("Synchronization coefficient calculated")
 
 	return avgCoef
 }
@@ -560,7 +571,8 @@ func (t *GrpcTransport) getOrCreateClient(node *entities.Node) (*grpc.ClientConn
 		Str("target_addr", targetAddr).
 		Msg("creating new client connection")
 
-	creds := credentials.NewTLS(t.tlsConfig)
+	// Используем клиентскую TLS конфигурацию с отключенной проверкой имени хоста
+	creds := credentials.NewTLS(t.clientTLSConfig)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -588,7 +600,7 @@ func (t *GrpcTransport) getOrCreateClient(node *entities.Node) (*grpc.ClientConn
 	return conn, nil
 }
 
-// Sync теперь строит Merkle-bucket хэши вместо Bloom-фильтра.
+// Sync now builds Merkle-bucket hashes instead of a Bloom filter.
 func (t *GrpcTransport) Sync(targetNode *entities.Node) error {
 	// Получаем все сущности через EntityRegistry
 	entitiesByType := make(map[string][]common.Entity)
@@ -782,17 +794,17 @@ func (t *GrpcTransport) Sync(targetNode *entities.Node) error {
 		totalEntities += len(entities)
 	}
 
-	// 4) Обрабатываем ответ: получим только те "entityType#bucketIdx", где MD5 !=
+	// 4) Process the response: we will get only those "entityType#bucketIdx" where MD5 !=
 	for compositeKey, bytesArray := range resp.Data {
 		parts := strings.SplitN(compositeKey, "#", 2)
 		if len(parts) != 2 {
 			continue
 		}
 		entityType := parts[0]
-		// bucketIdx, _ := strconv.Atoi(parts[1]) – этого нам внутри Go уже не нужно для StoreEntity
+		// bucketIdx, _ := strconv.Atoi(parts[1]) - we don't need this inside Go anymore for StoreEntity
 
 		for _, entityBytes := range bytesArray.Items {
-			// В зависимости от entityType десериализуем в конкретный объект.
+			// Depending on entityType we deserialize into a specific object.
 			switch entityType {
 			case common.NodeEntityType:
 				node, err := entities.NodeFromProtoBytes(entityBytes)
@@ -944,12 +956,12 @@ func (t *GrpcTransport) Sync(targetNode *entities.Node) error {
 		}
 	}
 
-	// Вычисляем коэффициент синхронизации для текущей операции
-	// 1.0 означает полную синхронизацию (нет различий)
-	// 0.0 означает полную рассинхронизацию (все сущности отличаются)
+	// Calculate the synchronization coefficient for the current operation
+	// 1.0 means complete synchronization (no differences)
+	// 0.0 means complete de-synchronization (all entities differ)
 	syncCoef := 1.0
 	if totalEntities > 0 {
-		// Если diffEntities больше totalEntities, ограничиваем соотношение единицей
+		// If diffEntities is greater than totalEntities, limit the ratio to one
 		syncRatio := float64(diffEntities) / float64(totalEntities)
 		if syncRatio > 1.0 {
 			syncRatio = 1.0
@@ -957,7 +969,7 @@ func (t *GrpcTransport) Sync(targetNode *entities.Node) error {
 		syncCoef = 1.0 - syncRatio
 	}
 
-	// Сохраняем статистику синхронизации
+	// Save synchronization statistics
 	syncStat := SyncStat{
 		Timestamp:       time.Now(),
 		RemoteNodeID:    targetNode.ID,

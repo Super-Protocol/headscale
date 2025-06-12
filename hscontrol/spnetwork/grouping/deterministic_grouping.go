@@ -43,9 +43,9 @@ func (dg *DeterministicGrouping) processGoal(goal *entities.GroupGoal) error {
 		if err != nil {
 			return err
 		}
-		// Проверяем здоровье текущих групп
+		// Check the health of existing groups
 		for _, group := range existingGroups {
-			// Исключаем мертвые ноды
+			// Exclude dead nodes
 			participantsCopy := make([]entities.Participant, len(group.Participants))
 			copy(participantsCopy, group.Participants)
 			for _, participant := range participantsCopy {
@@ -57,14 +57,14 @@ func (dg *DeterministicGrouping) processGoal(goal *entities.GroupGoal) error {
 						Msg("removed participant that is not alive")
 				}
 			}
-			// Исключаем ноды которые больше не удовлетворяют условиям
+			// Exclude nodes that no longer meet the conditions
 			var participantIDs []string
 			for _, participant := range participantsCopy {
 				participantIDs = append(participantIDs, participant.ID)
 			}
 			commonSuitableNodes, _, _, hasEnoughNodes := dg.registry.GetCommonNodesWithCapabilityForGoal(goal.GetID(), participantIDs, math.MaxInt)
 			if !hasEnoughNodes {
-				// Удаляем группу совсем?
+				// Delete the group completely?
 				err := dg.registry.Group.DeleteEntity(group.GetID())
 				if err != nil {
 					return err
@@ -72,7 +72,7 @@ func (dg *DeterministicGrouping) processGoal(goal *entities.GroupGoal) error {
 				break
 			}
 			for _, participant := range participantsCopy {
-				// Проверяем, находится ли участник в списке подходящих нод
+				// Check if the participant is in the list of suitable nodes
 				found := false
 				for _, suitableNode := range commonSuitableNodes {
 					if suitableNode.GetID() == participant.ID {
@@ -81,7 +81,7 @@ func (dg *DeterministicGrouping) processGoal(goal *entities.GroupGoal) error {
 					}
 				}
 
-				// Если участник не найден в списке подходящих нод, удаляем его из группы
+				// If the participant is not found in the list of suitable nodes, remove it from the group
 				if !found {
 					group.RemoveParticipant(participant.ID)
 					log.Debug().
@@ -90,17 +90,17 @@ func (dg *DeterministicGrouping) processGoal(goal *entities.GroupGoal) error {
 						Msg("removed participant that is no longer suitable for this group")
 				}
 			}
-			// Проверяем размеры группы и удаляем лишние
+			// Check group size and remove excess participants
 			if len(group.Participants) > goal.MaxGroupSize {
 				participantsCopy := make([]entities.Participant, len(group.Participants))
 				copy(participantsCopy, group.Participants)
 
-				// Сортируем участников по дате добавления (от новых к старым)
+				// Sort participants by join date (from newest to oldest)
 				sort.Slice(participantsCopy, func(i, j int) bool {
 					return participantsCopy[i].JoinDateUnix > participantsCopy[j].JoinDateUnix
 				})
 
-				// Удаляем участника, который был добавлен последним
+				// Remove the participant that was added most recently
 				if len(participantsCopy) > 0 {
 					participantToRemove := participantsCopy[0]
 					group.RemoveParticipant(participantToRemove.ID)
@@ -111,7 +111,7 @@ func (dg *DeterministicGrouping) processGoal(goal *entities.GroupGoal) error {
 						Msg("removed most recently added participant to maintain maximum group size")
 				}
 			}
-			// Проверяем размеры группы и добавляем новые
+			// Check group size and add new participants
 			if len(group.Participants) < goal.MaxGroupSize {
 				_, _, commonNonGroupedNodes, _ := dg.registry.GetCommonNodesWithCapabilityForGoal(goal.GetID(), participantIDs, goal.MaxGroupSize*2)
 				maxCountToAdd := goal.MaxGroupSize - len(group.Participants)
@@ -120,40 +120,40 @@ func (dg *DeterministicGrouping) processGoal(goal *entities.GroupGoal) error {
 				}
 			}
 		}
-		// Пытаемся собрать новые группы
+		// Try to form new groups
 		nonGroupedNodes, err := dg.registry.GetNonGroupedNodesForGoal(goal.GetID())
 		if err != nil {
 			log.Error().
 				Err(err).
 				Str("goal_id", goal.GetID()).
-				Msg("ошибка при получении несгруппированных нод")
+				Msg("error getting non-grouped nodes")
 			return err
 		}
 
 		if len(nonGroupedNodes) == 0 {
 			log.Debug().
 				Str("goal_id", goal.GetID()).
-				Msg("нет несгруппированных нод для создания новых групп")
+				Msg("no non-grouped nodes available for creating new groups")
 			return nil
 		}
 
-		// Проверяем, что есть достаточно нод для возможности создания хотя бы одной группы
+		// Check that there are enough nodes to create at least one group
 		if len(nonGroupedNodes) < goal.GetMinGroupSize() {
 			log.Debug().
 				Str("goal_id", goal.GetID()).
 				Int("non_grouped_nodes", len(nonGroupedNodes)).
 				Int("min_required", goal.GetMinGroupSize()).
-				Msg("недостаточно несгруппированных нод для создания группы")
+				Msg("not enough non-grouped nodes to create a group")
 			return nil
 		}
 
-		// Получаем ID всех несгруппированных нод
+		// Get IDs of all non-grouped nodes
 		nonGroupedNodeIDs := make([]string, len(nonGroupedNodes))
 		for i, node := range nonGroupedNodes {
 			nonGroupedNodeIDs[i] = node.GetID()
 		}
 
-		// Выполняем GetCommonNodesWithCapabilityForGoal для списка несгруппированных нод
+		// Execute GetCommonNodesWithCapabilityForGoal for the list of non-grouped nodes
 		_, _, commonNonGroupedNodes, hasEnough := dg.registry.GetCommonNodesWithCapabilityForGoal(
 			goal.GetID(),
 			nonGroupedNodeIDs,
@@ -164,58 +164,58 @@ func (dg *DeterministicGrouping) processGoal(goal *entities.GroupGoal) error {
 			Int("non_grouped_nodes", len(nonGroupedNodes)).
 			Int("common_non_grouped_nodes", len(commonNonGroupedNodes)).
 			Bool("has_enough_nodes", hasEnough).
-			Msg("получен список совместимых несгруппированных нод")
+			Msg("received list of compatible non-grouped nodes")
 
-		// Проверяем, что есть достаточно нод для создания хотя бы одной группы
+		// Check that there are enough nodes to create at least one group
 		if len(commonNonGroupedNodes) < goal.GetMinGroupSize() {
 			log.Debug().
 				Str("goal_id", goal.GetID()).
 				Int("common_non_grouped_nodes", len(commonNonGroupedNodes)).
 				Int("min_required", goal.GetMinGroupSize()).
-				Msg("недостаточно совместимых нод для создания группы")
+				Msg("not enough compatible nodes to create a group")
 			return nil
 		}
 
-		// Разделяем список commonNonGroupedNodes на подгруппы размером goal.MaxGroupSize
+		// Split the commonNonGroupedNodes list into subgroups of size goal.MaxGroupSize
 		maxGroupSize := goal.GetMaxGroupSize()
 		minGroupSize := goal.GetMinGroupSize()
 		numGroups := (len(commonNonGroupedNodes) + maxGroupSize - 1) / maxGroupSize
 
 		for i := 0; i < numGroups; i++ {
-			// Определяем индексы начала и конца для текущей подгруппы
+			// Define start and end indexes for the current subgroup
 			startIdx := i * maxGroupSize
 			endIdx := startIdx + maxGroupSize
 			if endIdx > len(commonNonGroupedNodes) {
 				endIdx = len(commonNonGroupedNodes)
 			}
 
-			// Проверяем, что подгруппа достаточно большая (не меньше MinGroupSize)
+			// Check that the subgroup is large enough (not less than MinGroupSize)
 			if endIdx-startIdx < minGroupSize {
 				log.Debug().
 					Str("goal_id", goal.GetID()).
 					Int("nodes_in_subgroup", endIdx-startIdx).
 					Int("min_required", minGroupSize).
-					Msg("пропуск создания группы - недостаточный размер подгруппы")
+					Msg("skipping group creation - insufficient subgroup size")
 				continue
 			}
 
-			// Создаем новую группу
+			// Create a new group
 			newGroup := entities.NewGroup()
 			newGroup.SetGoal(goal.GetID())
 
-			// Добавляем ноды в группу
+			// Add nodes to the group
 			for j := startIdx; j < endIdx; j++ {
 				newGroup.AddParticipant(commonNonGroupedNodes[j].GetID())
 			}
 
-			// Сохраняем группу в реестре
+			// Save the group in the registry
 			_, err := dg.registry.Group.StoreEntity(newGroup)
 			if err != nil {
 				log.Error().
 					Err(err).
 					Str("goal_id", goal.GetID()).
 					Str("group_id", newGroup.GetID()).
-					Msg("ошибка при сохранении новой группы")
+					Msg("error saving new group")
 				continue
 			}
 
@@ -223,41 +223,41 @@ func (dg *DeterministicGrouping) processGoal(goal *entities.GroupGoal) error {
 				Str("goal_id", goal.GetID()).
 				Str("group_id", newGroup.GetID()).
 				Int("participants", len(newGroup.GetParticipants())).
-				Msg("создана новая группа из несгруппированных нод")
+				Msg("created new group from non-grouped nodes")
 		}
 
-		// Удаляем группы у которых размер меньше минимального
-		// GetGroupsByGoal уже возвращает только неудаленные группы
+		// Remove groups whose size is less than the minimum
+		// GetGroupsByGoal already returns only non-deleted groups
 		existingGroups, err = dg.registry.GetGroupsByGoal(goal.GetID())
 		if err != nil {
 			log.Error().
 				Err(err).
 				Str("goal_id", goal.GetID()).
-				Msg("ошибка при получении групп для проверки минимального размера")
+				Msg("error getting groups for minimum size check")
 			return err
 		}
 
 		for _, group := range existingGroups {
-			// Проверяем размер группы и удаляем, если он меньше минимального
+			// Check the group size and remove it if it's less than the minimum
 			if len(group.GetParticipants()) < goal.GetMinGroupSize() {
 				log.Info().
 					Str("goal_id", goal.GetID()).
 					Str("group_id", group.GetID()).
 					Int("participants", len(group.GetParticipants())).
 					Int("min_required", goal.GetMinGroupSize()).
-					Msg("удаление группы с недостаточным количеством участников")
+					Msg("removing group with insufficient number of participants")
 
-				// Помечаем группу как удаленную
+				// Mark the group as deleted
 				group.MarkDeleted()
 
-				// И сохраняем изменения в реестре
+				// And save the changes in the registry
 				_, err := dg.registry.Group.StoreEntity(group)
 				if err != nil {
 					log.Error().
 						Err(err).
 						Str("goal_id", goal.GetID()).
 						Str("group_id", group.GetID()).
-						Msg("ошибка при удалении группы с недостаточным количеством участников")
+						Msg("error when removing group with insufficient number of participants")
 				}
 			}
 		}
@@ -265,7 +265,7 @@ func (dg *DeterministicGrouping) processGoal(goal *entities.GroupGoal) error {
 	return nil
 }
 
-// Start запускает процесс группировки
+// Start initiates the grouping process
 func (dg *DeterministicGrouping) Start() error {
 	dg.mu.Lock()
 	defer dg.mu.Unlock()
@@ -289,7 +289,7 @@ func (dg *DeterministicGrouping) Start() error {
 	return nil
 }
 
-// Stop останавливает процесс группировки
+// Stop terminates the grouping process
 func (dg *DeterministicGrouping) Stop() error {
 	dg.mu.Lock()
 	defer dg.mu.Unlock()
@@ -309,7 +309,7 @@ func (dg *DeterministicGrouping) Stop() error {
 	return nil
 }
 
-// groupingLoop периодически обрабатывает все цели группировки
+// groupingLoop periodically processes all grouping goals
 func (dg *DeterministicGrouping) groupingLoop() {
 	ticker := time.NewTicker(dg.groupingInterval)
 	defer ticker.Stop()
@@ -327,7 +327,7 @@ func (dg *DeterministicGrouping) groupingLoop() {
 	}
 }
 
-// runGroupingIfNotRunning запускает процесс группировки, если он еще не запущен
+// runGroupingIfNotRunning starts the grouping process if it's not already running
 func (dg *DeterministicGrouping) runGroupingIfNotRunning() error {
 	dg.mu.Lock()
 	if dg.groupingRunning {
@@ -347,7 +347,7 @@ func (dg *DeterministicGrouping) runGroupingIfNotRunning() error {
 			dg.mu.Unlock()
 		}()
 
-		// Получаем все цели группировки
+		// Get all grouping goals
 		goals, err := dg.registry.GroupGoal.GetAllEntities()
 		if err != nil {
 			log.Error().
@@ -361,7 +361,7 @@ func (dg *DeterministicGrouping) runGroupingIfNotRunning() error {
 			return
 		}
 
-		// Обрабатываем каждую цель
+		// Process each goal
 		for _, goal := range goals {
 			err := dg.processGoal(goal)
 			if err != nil {

@@ -6,9 +6,9 @@ import (
 )
 
 // StartAPIServer создает и запускает API сервер для EntityRegistry
-func StartAPIServer(registry *common.EntityRegistry, addr string) (*Server, error) {
-	server := NewServer(registry)
-	
+func StartAPIServer(registry *common.EntityRegistry, addr string, eventLog []string) (*Server, error) {
+	server := NewServer(registry, &eventLog)
+
 	// Запускаем сервер в отдельной горутине
 	go func() {
 		err := server.Start(addr)
@@ -16,10 +16,10 @@ func StartAPIServer(registry *common.EntityRegistry, addr string) (*Server, erro
 			log.Error().Err(err).Msg("API server error")
 		}
 	}()
-	
+
 	log.Info().
 		Str("addr", addr).
 		Msg("API server started")
-	
+
 	return server, nil
 }
